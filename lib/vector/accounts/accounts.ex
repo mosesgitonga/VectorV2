@@ -39,7 +39,7 @@ defmodule Vector.Accounts do
     |> Repo.insert()
     |> case do
       {:ok, user} ->
-        send_confirmation_email(user)
+        Task.start(fn -> send_confirmation_email(user) end)
         {:ok, user}
 
       error ->
