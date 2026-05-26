@@ -8,8 +8,7 @@ defmodule Vector.Payments.Paystack do
       email: email,
       amount: amount_kobo,
       reference: reference,
-      metadata: metadata,
-      callback_url: callback_url()
+      metadata: metadata
     }
 
     post("/transaction/initialize", body)
@@ -90,8 +89,4 @@ defmodule Vector.Payments.Paystack do
     ]
   end
 
-  defp callback_url do
-    base = Application.get_env(:vector, :app_url, "http://localhost:4000")
-    "#{base}/api/payments/webhook"
-  end
 end
