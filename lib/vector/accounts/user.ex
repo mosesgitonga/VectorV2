@@ -16,6 +16,7 @@ defmodule Vector.Accounts.User do
     field :email_confirmed, :boolean, default: false
     field :balance, :decimal, default: 0
     field :is_active, :boolean, default: true
+    field :phone_number, :string
 
     has_many :email_tokens, Vector.Accounts.EmailToken
     has_many :created_tournaments, Vector.Tournaments.Tournament, foreign_key: :creator_id
@@ -52,6 +53,27 @@ defmodule Vector.Accounts.User do
     change(user, email_confirmed: true)
   end
 
+  def credit_balance_changeset(user, amount) do
+    new_balance = Decimal.add(user.balance, Decimal.new("#{amount}"))
+    change(user, balance: new_balance)
+  end
+
+  def deduct_balance_changeset(user, amount) do
+    new_balance = Decimal.sub(user.balance, Decimal.new("#{amount}"))
+
+    user
+    |> change(balance: new_balance)
+    |> validate_number(:balance, greater_than_or_equal_to: 0,
+         message: "Insufficient wallet balance")
+  end
+
+  def phone_changeset(user, attrs) do
+    user
+    |> cast(attrs, [:phone_number])
+    |> validate_required([:phone_number])
+    |> validate_format(:phone_number, ~r/^\+?[0-9]{9,15}$/, message: "must be a valid phone number (e.g. 0712345678)")
+  end
+
   def admin_changeset(user, attrs) do
     user
     |> cast(attrs, [:role, :is_active])
@@ -61,7 +83,7 @@ defmodule Vector.Accounts.User do
   defp validate_email(changeset) do
     changeset
     |> validate_required([:email])
-    |> validate_format(:email, ~r/^[^\s]+@[^\s]+$/, message: "must be a valid email")
+    |> validate_format(:email, ~r/^[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/, message: "must be a valid email")
     |> validate_length(:email, max: 160)
     |> unsafe_validate_unique(:email, Vector.Repo)
     |> unique_constraint(:email)

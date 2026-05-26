@@ -4,40 +4,48 @@ defmodule VectorWeb.AuthController do
   alias Vector.Accounts
   alias Vector.Accounts.Guardian
 
+  # 10 attempts per minute per IP on sensitive endpoints
+  @rate_limit_scale_ms 60_000
+  @rate_limit_max      10
+
   # ── Email/password registration ────────────────────────────────────────────
 
   def register(conn, params) do
-    case Accounts.register_user(params) do
-      {:ok, user} ->
-        {:ok, token, _claims} = Guardian.encode_and_sign(user)
+    with :ok <- check_rate(conn, "register") do
+      case Accounts.register_user(params) do
+        {:ok, user} ->
+          {:ok, token, _claims} = Guardian.encode_and_sign(user)
 
-        conn
-        |> put_status(:created)
-        |> json(%{user: user_json(user), token: token,
-                   message: "Registration successful. Please confirm your email."})
+          conn
+          |> put_status(:created)
+          |> json(%{user: user_json(user), token: token,
+                     message: "Registration successful. Please confirm your email."})
 
-      {:error, changeset} ->
-        conn
-        |> put_status(:unprocessable_entity)
-        |> json(%{errors: format_errors(changeset)})
+        {:error, changeset} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{errors: format_errors(changeset)})
+      end
     end
   end
 
   def login(conn, %{"email" => email, "password" => password}) do
-    case Accounts.authenticate_user(email, password) do
-      {:ok, user} ->
-        {:ok, token, _claims} = Guardian.encode_and_sign(user)
-        json(conn, %{user: user_json(user), token: token})
+    with :ok <- check_rate(conn, "login") do
+      case Accounts.authenticate_user(email, password) do
+        {:ok, user} ->
+          {:ok, token, _claims} = Guardian.encode_and_sign(user)
+          json(conn, %{user: user_json(user), token: token})
 
-      {:error, :invalid_credentials} ->
-        conn
-        |> put_status(:unauthorized)
-        |> json(%{error: "Invalid email or password"})
+        {:error, :invalid_credentials} ->
+          conn
+          |> put_status(:unauthorized)
+          |> json(%{error: "Invalid email or password"})
 
-      {:error, :account_disabled} ->
-        conn
-        |> put_status(:forbidden)
-        |> json(%{error: "Account has been disabled"})
+        {:error, :account_disabled} ->
+          conn
+          |> put_status(:forbidden)
+          |> json(%{error: "Account has been disabled"})
+      end
     end
   end
 
@@ -93,17 +101,21 @@ defmodule VectorWeb.AuthController do
   # ── Password reset ─────────────────────────────────────────────────────────
 
   def forgot_password(conn, %{"email" => email}) do
-    Accounts.send_password_reset_email(email)
-    json(conn, %{message: "If that email exists, a reset link has been sent"})
+    with :ok <- check_rate(conn, "forgot_password") do
+      Accounts.send_password_reset_email(email)
+      json(conn, %{message: "If that email exists, a reset link has been sent"})
+    end
   end
 
   def reset_password(conn, %{"token" => token, "password" => password}) do
-    case Accounts.reset_password(token, password) do
-      {:ok, _user} ->
-        json(conn, %{message: "Password reset successfully"})
+    with :ok <- check_rate(conn, "reset_password") do
+      case Accounts.reset_password(token, password) do
+        {:ok, _user} ->
+          json(conn, %{message: "Password reset successfully"})
 
-      {:error, _} ->
-        conn |> put_status(:bad_request) |> json(%{error: "Invalid or expired token"})
+        {:error, _} ->
+          conn |> put_status(:bad_request) |> json(%{error: "Invalid or expired token"})
+      end
     end
   end
 
@@ -111,7 +123,37 @@ defmodule VectorWeb.AuthController do
     json(conn, %{user: user_json(conn.assigns.current_user)})
   end
 
+  def update_phone(conn, %{"phone_number" => phone}) do
+    user = conn.assigns.current_user
+
+    case Accounts.update_phone(user, phone) do
+      {:ok, updated_user} ->
+        json(conn, %{user: user_json(updated_user)})
+
+      {:error, changeset} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{errors: format_errors(changeset)})
+    end
+  end
+
   # ── Private ────────────────────────────────────────────────────────────────
+
+  defp check_rate(conn, action) do
+    ip = conn.remote_ip |> :inet.ntoa() |> to_string()
+
+    case ExRated.check_rate("#{action}:#{ip}", @rate_limit_scale_ms, @rate_limit_max) do
+      {:ok, _count} ->
+        :ok
+
+      {:error, _limit} ->
+        conn
+        |> put_status(:too_many_requests)
+        |> json(%{error: "Too many attempts. Please try again later."})
+        |> halt()
+        |> then(fn _ -> {:error, :rate_limited} end)
+    end
+  end
 
   defp fetch_google_user(code) do
     token_url = "https://oauth2.googleapis.com/token"
@@ -131,7 +173,8 @@ defmodule VectorWeb.AuthController do
     with {:ok, %{status: 200, body: body}} <-
            Finch.build(:post, token_url, [{"Content-Type", "application/x-www-form-urlencoded"}], body)
            |> Finch.request(Vector.Finch),
-         %{"access_token" => access_token} <- Jason.decode!(body),
+         {:ok, decoded} <- Jason.decode(body),
+         {:ok, access_token} <- Map.fetch(decoded, "access_token"),
          {:ok, user_info} <- fetch_google_user_info(access_token) do
       {:ok,
        %{
@@ -141,7 +184,13 @@ defmodule VectorWeb.AuthController do
          avatar_url: user_info["picture"],
          email_confirmed: true
        }}
-    end 
+    else
+      {:ok, %{status: status}} -> {:error, {:token_exchange_failed, status}}
+      {:ok, _non_200} -> {:error, :token_exchange_failed}
+      :error -> {:error, :missing_access_token}
+      {:error, %Jason.DecodeError{}} -> {:error, :invalid_json_response}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp fetch_google_user_info(access_token) do
@@ -162,7 +211,8 @@ defmodule VectorWeb.AuthController do
       avatar_url: user.avatar_url,
       role: user.role,
       email_confirmed: user.email_confirmed,
-      balance: user.balance
+      balance: user.balance,
+      phone_number: user.phone_number
     }
   end
 

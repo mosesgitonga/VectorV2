@@ -1,51 +1,165 @@
 defmodule Vector.Payments do
   import Ecto.Query
+  require Logger
   alias Vector.Repo
+  alias Vector.Accounts.User
   alias Vector.Payments.{Transaction, Paystack}
   alias Vector.Tournaments
 
-  @platform_fee_percent Decimal.new("0.15")
+  @platform_fee_percent   Decimal.new("0.15")
+  @min_deposit            Decimal.new("30")
+  @max_deposit            Decimal.new("5000")
+  @min_withdrawal         Decimal.new("10")
+  @max_withdrawal         Decimal.new("5000")
+  @withdrawal_window_secs 600   # 10-minute rolling window
 
-  # ── Entry fee ──────────────────────────────────────────────────────────────
+  # ── Wallet deposit ─────────────────────────────────────────────────────────
 
-  def create_entry_fee_transaction(user, tournament) do
-    reference = unique_reference()
-    amount = tournament.entry_fee
-    amount_kobo = to_kobo(amount)
+  def create_deposit(user, amount) do
+    amount_dec = Decimal.new("#{amount}")
 
-    {access_code, paystack_meta} =
-      case Paystack.initialize_transaction(user.email, amount_kobo, reference, %{
-             tournament_id: tournament.id,
-             user_id: user.id,
-             type: "entry_fee"
-           }) do
-        {:ok, response} ->
-          {get_in(response, ["data", "access_code"]), response["data"]}
+    cond do
+      Decimal.lt?(amount_dec, @min_deposit) ->
+        {:error, "Minimum deposit is KES 30"}
 
-        {:error, _reason} ->
-          {nil, %{}}
-      end
+      Decimal.gt?(amount_dec, @max_deposit) ->
+        {:error, "Maximum deposit is KES 5,000"}
 
-    %Transaction{}
-    |> Transaction.changeset(%{
-      user_id: user.id,
-      tournament_id: tournament.id,
-      type: "entry_fee",
-      amount: amount,
-      paystack_reference: reference,
-      paystack_access_code: access_code,
-      metadata: %{paystack: paystack_meta}
-    })
-    |> Repo.insert()
+      true ->
+        reference = unique_reference()
+        amount_kobo = to_kobo(amount_dec)
+
+        {access_code, paystack_meta} =
+          case Paystack.initialize_transaction(user.email, amount_kobo, reference, %{
+                 user_id: user.id,
+                 type: "deposit"
+               }) do
+            {:ok, response} -> {get_in(response, ["data", "access_code"]), response["data"]}
+            {:error, _} -> {nil, %{}}
+          end
+
+        %Transaction{}
+        |> Transaction.changeset(%{
+          user_id: user.id,
+          type: "deposit",
+          amount: amount_dec,
+          paystack_reference: reference,
+          paystack_access_code: access_code,
+          metadata: %{paystack: paystack_meta}
+        })
+        |> Repo.insert()
+    end
   end
+
+  # ── Entry fee from wallet ──────────────────────────────────────────────────
+
+  def deduct_entry_fee(user, tournament) do
+    Repo.transaction(fn ->
+      fresh_user = from(u in User, where: u.id == ^user.id, lock: "FOR UPDATE") |> Repo.one!()
+
+      case fresh_user |> User.deduct_balance_changeset(tournament.entry_fee) |> Repo.update() do
+        {:ok, _updated_user} ->
+          %Transaction{}
+          |> Transaction.changeset(%{
+            user_id: user.id,
+            tournament_id: tournament.id,
+            type: "entry_fee",
+            amount: tournament.entry_fee,
+            paystack_reference: unique_reference(),
+            status: "success",
+            metadata: %{note: "Deducted from wallet"}
+          })
+          |> Repo.insert()
+          |> case do
+            {:ok, tx} -> tx
+            {:error, reason} -> Repo.rollback(reason)
+          end
+
+        {:error, changeset} ->
+          Repo.rollback(changeset)
+      end
+    end)
+  end
+
+  # ── Wallet withdrawal ──────────────────────────────────────────────────────
+
+  def create_withdrawal(user, amount) do
+    amount_dec = Decimal.new("#{amount}")
+
+    cond do
+      is_nil(user.phone_number) or user.phone_number == "" ->
+        {:error, :no_phone_number}
+
+      Decimal.lt?(amount_dec, @min_withdrawal) ->
+        {:error, "Minimum withdrawal is KES #{@min_withdrawal}"}
+
+      Decimal.gt?(amount_dec, @max_withdrawal) ->
+        {:error, "Maximum single withdrawal is KES #{@max_withdrawal}"}
+
+      true ->
+        Repo.transaction(fn ->
+          # Lock the user row first — all balance and rate-limit checks
+          # happen under this lock so two concurrent requests can't both pass.
+          fresh_user =
+            from(u in User, where: u.id == ^user.id, lock: "FOR UPDATE")
+            |> Repo.one!()
+
+          if Decimal.lt?(fresh_user.balance, amount_dec) do
+            Repo.rollback(:insufficient_balance)
+          end
+
+          # Sum of successful withdrawals by this user in the last 10 minutes.
+          # Done inside the locked transaction so the check is serialised.
+          already_withdrawn = withdrawn_in_window(fresh_user.id)
+          projected_total   = Decimal.add(already_withdrawn, amount_dec)
+
+          if Decimal.gt?(projected_total, @max_withdrawal) do
+            remaining = Decimal.sub(@max_withdrawal, already_withdrawn) |> Decimal.max(Decimal.new("0"))
+            Repo.rollback({:rate_limited, remaining})
+          end
+
+          with {:ok, _} <-
+                 fresh_user |> User.deduct_balance_changeset(amount_dec) |> Repo.update(),
+               {:ok, tx} <-
+                 %Transaction{}
+                 |> Transaction.changeset(%{
+                   user_id: fresh_user.id,
+                   type: "withdrawal",
+                   amount: amount_dec,
+                   paystack_reference: unique_reference(),
+                   status: "success",
+                   metadata: %{note: "Wallet withdrawal"}
+                 })
+                 |> Repo.insert() do
+            Logger.info("Withdrawal processed", user_id: fresh_user.id, amount: amount_dec)
+            tx
+          else
+            {:error, reason} -> Repo.rollback(reason)
+          end
+        end)
+    end
+  end
+
+  # Returns the remaining KES a user can withdraw in the current window.
+  def withdrawal_limit_remaining(user_id) do
+    already = withdrawn_in_window(user_id)
+    Decimal.sub(@max_withdrawal, already) |> Decimal.max(Decimal.new("0"))
+  end
+
+  # ── Webhook / confirm ──────────────────────────────────────────────────────
 
   def handle_webhook(payload, signature) do
     with true <- verify_signature(payload, signature),
          %{"event" => event, "data" => data} <- Jason.decode!(payload) do
+      Logger.info("Paystack webhook received", event: event)
       process_event(event, data)
     else
-      false -> {:error, :invalid_signature}
-      _ -> {:error, :invalid_payload}
+      false ->
+        Logger.warning("Paystack webhook: invalid signature")
+        {:error, :invalid_signature}
+      _ ->
+        Logger.warning("Paystack webhook: invalid payload")
+        {:error, :invalid_payload}
     end
   end
 
@@ -59,8 +173,7 @@ defmodule Vector.Payments do
         transaction ->
           with {:ok, transaction} <-
                  transaction |> Transaction.confirm_changeset(reference) |> Repo.update() do
-            Tournaments.mark_participant_paid(transaction.tournament_id, transaction.user_id)
-            Tournaments.confirm_payment_and_start(transaction.tournament_id)
+            handle_confirmed_transaction(transaction)
             {:ok, transaction}
           end
       end
@@ -69,37 +182,52 @@ defmodule Vector.Payments do
     end
   end
 
+  # ── Payout / refund ────────────────────────────────────────────────────────
+
   def pay_winner(winner_id, tournament, prize_amount) do
-    reference = unique_reference()
+    Logger.info("Paying tournament winner", winner_id: winner_id, tournament_id: tournament.id, amount: prize_amount)
+    Repo.transaction(fn ->
+      user = from(u in User, where: u.id == ^winner_id, lock: "FOR UPDATE") |> Repo.one!()
 
-    %Transaction{}
-    |> Transaction.changeset(%{
-      user_id: winner_id,
-      tournament_id: tournament.id,
-      type: "payout",
-      amount: prize_amount,
-      paystack_reference: reference,
-      metadata: %{note: "Tournament prize payout"}
-    })
-    |> Repo.insert()
-  end
-
-  def refund_tournament_participants(tournament) do
-    Transaction
-    |> where(tournament_id: ^tournament.id, type: "entry_fee", status: "success")
-    |> Repo.all()
-    |> Enum.each(fn tx ->
-      amount_kobo = to_kobo(tx.amount)
-
-      case Paystack.refund(tx.paystack_reference, amount_kobo) do
-        {:ok, _} ->
-          tx |> Transaction.refund_changeset() |> Repo.update()
-
-        {:error, _} ->
-          :noop
+      with {:ok, _} <- user |> User.credit_balance_changeset(prize_amount) |> Repo.update(),
+           {:ok, tx} <-
+             %Transaction{}
+             |> Transaction.changeset(%{
+               user_id: winner_id,
+               tournament_id: tournament.id,
+               type: "payout",
+               amount: prize_amount,
+               paystack_reference: unique_reference(),
+               status: "success",
+               metadata: %{note: "Tournament prize credited to wallet"}
+             })
+             |> Repo.insert() do
+        tx
+      else
+        {:error, reason} -> Repo.rollback(reason)
       end
     end)
   end
+
+  def refund_tournament_participants(tournament) do
+    transactions =
+      Transaction
+      |> where(tournament_id: ^tournament.id, type: "entry_fee", status: "success")
+      |> Repo.all()
+
+    Enum.reduce_while(transactions, :ok, fn tx, _acc ->
+      user = from(u in User, where: u.id == ^tx.user_id, lock: "FOR UPDATE") |> Repo.one!()
+
+      with {:ok, _} <- user |> User.credit_balance_changeset(tx.amount) |> Repo.update(),
+           {:ok, _} <- tx |> Transaction.refund_changeset() |> Repo.update() do
+        {:cont, :ok}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # ── Queries ────────────────────────────────────────────────────────────────
 
   def list_transactions(user_id) do
     Transaction
@@ -125,10 +253,32 @@ defmodule Vector.Payments do
     Transaction
     |> where(type: "entry_fee", status: "success")
     |> Repo.aggregate(:sum, :amount)
-    |> Decimal.mult(@platform_fee_percent)
+    |> then(&(if &1, do: Decimal.mult(&1, @platform_fee_percent), else: Decimal.new(0)))
+  end
+
+  def get_user_balance(user_id) do
+    Repo.get!(User, user_id).balance
   end
 
   # ── Private ────────────────────────────────────────────────────────────────
+
+  defp handle_confirmed_transaction(%{type: "deposit"} = tx) do
+    Repo.transaction(fn ->
+      user = from(u in User, where: u.id == ^tx.user_id, lock: "FOR UPDATE") |> Repo.one!()
+
+      case user |> User.credit_balance_changeset(tx.amount) |> Repo.update() do
+        {:ok, _} -> :ok
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+  end
+
+  defp handle_confirmed_transaction(%{type: "entry_fee"} = tx) do
+    Tournaments.mark_participant_paid(tx.tournament_id, tx.user_id)
+    Tournaments.confirm_payment_and_start(tx.tournament_id)
+  end
+
+  defp handle_confirmed_transaction(_tx), do: :ok
 
   defp process_event("charge.success", data) do
     reference = data["reference"]
@@ -137,13 +287,19 @@ defmodule Vector.Payments do
 
   defp process_event(_event, _data), do: :ok
 
+  defp withdrawn_in_window(user_id) do
+    window_start = DateTime.utc_now() |> DateTime.add(-@withdrawal_window_secs, :second)
+
+    Transaction
+    |> where(user_id: ^user_id, type: "withdrawal", status: "success")
+    |> where([t], t.inserted_at >= ^window_start)
+    |> Repo.aggregate(:sum, :amount)
+    |> then(&(&1 || Decimal.new("0")))
+  end
+
   defp verify_signature(payload, signature) do
     secret = Application.fetch_env!(:vector, :paystack_secret_key)
-
-    expected =
-      :crypto.mac(:hmac, :sha512, secret, payload)
-      |> Base.encode16(case: :lower)
-
+    expected = :crypto.mac(:hmac, :sha512, secret, payload) |> Base.encode16(case: :lower)
     Plug.Crypto.secure_compare(expected, signature)
   end
 

@@ -65,6 +65,11 @@ defmodule VectorWeb.PaymentController do
           reference: transaction.paystack_reference
         })
 
+      {:error, :no_phone_number} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: "no_phone_number", message: "Please set your M-Pesa phone number before withdrawing."})
+
       {:error, {:rate_limited, remaining}} ->
         conn
         |> put_status(:too_many_requests)

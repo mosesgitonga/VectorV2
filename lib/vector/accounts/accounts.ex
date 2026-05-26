@@ -73,6 +73,12 @@ defmodule Vector.Accounts do
     |> Repo.update()
   end
 
+  def update_phone(user, phone_number) do
+    user
+    |> User.phone_changeset(%{phone_number: phone_number})
+    |> Repo.update()
+  end
+
   def authenticate_user(email, password) do
     user = get_user_by_email(email)
 

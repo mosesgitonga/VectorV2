@@ -3,7 +3,6 @@ defmodule VectorWeb.Router do
 
   pipeline :api do
     plug :accepts, ["json"]
-    plug CORSPlug
   end
 
   pipeline :authenticated do
@@ -39,20 +38,26 @@ defmodule VectorWeb.Router do
 
     get "/auth/me", AuthController, :me
     post "/auth/resend-confirmation", AuthController, :resend_confirmation
+    put "/auth/phone", AuthController, :update_phone
 
     get "/users/:id", UserController, :show
     put "/users/me", UserController, :update
 
     get "/tournaments", TournamentController, :index
     get "/tournaments/mine", TournamentController, :my_tournaments
+    get "/tournaments/waiting", TournamentController, :waiting
     get "/tournaments/:id", TournamentController, :show
     post "/tournaments", TournamentController, :create
     post "/tournaments/join", TournamentController, :join
     post "/tournaments/:id/invite", TournamentController, :invite
+    delete "/tournaments/:id", TournamentController, :cancel
     get "/tournaments/:id/sessions", TournamentController, :sessions
 
     get "/games/:id", GameController, :show
 
+    post "/payments/deposit", PaymentController, :deposit
+    post "/payments/withdraw", PaymentController, :withdraw
+    get "/payments/withdraw/limit", PaymentController, :withdrawal_limit
     get "/payments/verify/:reference", PaymentController, :verify
     get "/payments/transactions", PaymentController, :my_transactions
   end
