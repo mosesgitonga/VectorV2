@@ -38,11 +38,11 @@ config :ueberauth, Ueberauth.Strategy.Google.OAuth,
 # Swoosh email
 config :vector, Vector.Mailer, adapter: Swoosh.Adapters.SMTP
 
-# CORS
+# CORS — overridden per environment in runtime.exs (prod) or dev.exs
 config :cors_plug,
-  origin: ["http://localhost:3000"],
+  origin: "*",
   max_age: 86_400,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  headers: ["Authorization", "Content-Type", "Accept"]
+  headers: ["Authorization", "Content-Type", "Accept", "Origin"]
 
 import_config "#{config_env()}.exs"

@@ -7,16 +7,31 @@ end
 config :vector, VectorWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
-# App-level config available in all envs
+# App-level config — only override values that are explicitly set in the environment
+# so that dev.exs defaults are preserved when env vars are absent
 config :vector,
   app_url: System.get_env("APP_URL", "http://localhost:3000"),
-  paystack_secret_key: System.get_env("PAYSTACK_SECRET_KEY", ""),
   google_client_id: System.get_env("GOOGLE_CLIENT_ID", ""),
   google_client_secret: System.get_env("GOOGLE_CLIENT_SECRET", ""),
   google_redirect_uri: System.get_env("GOOGLE_REDIRECT_URI", "http://localhost:4000/api/auth/google/callback")
 
+if paystack_key = System.get_env("PAYSTACK_SECRET_KEY") do
+  config :vector, paystack_secret_key: paystack_key
+end
+
+guardian_secret =
+  if config_env() == :prod do
+    System.get_env("GUARDIAN_SECRET") ||
+      raise "environment variable GUARDIAN_SECRET is missing."
+  else
+    System.get_env("GUARDIAN_SECRET", "dev_secret_not_for_production")
+  end
+
 config :vector, Vector.Accounts.Guardian,
-  secret_key: System.get_env("GUARDIAN_SECRET", "dev_secret_change_in_prod_please_use_a_long_random_string")
+  secret_key: guardian_secret
+
+# Swoosh uses SMTP (gen_smtp) — no HTTP API client needed
+config :swoosh, :api_client, false
 
 if config_env() == :prod do
   database_url =
@@ -52,6 +67,11 @@ if config_env() == :prod do
     tls: :always,
     auth: :always
 
+  frontend_url = System.get_env("FRONTEND_URL", "*")
+
   config :cors_plug,
-    origin: [System.get_env("FRONTEND_URL", "https://yourdomain.com")]
+    origin: (if frontend_url == "*", do: "*", else: [frontend_url]),
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    headers: ["Authorization", "Content-Type", "Accept", "Origin"],
+    max_age: 86400
 end
