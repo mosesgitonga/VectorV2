@@ -42,13 +42,15 @@ defmodule VectorWeb.Endpoint do
     param_key: "request_logger",
     cookie_key: "request_logger"
 
+  plug CORSPlug
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
-    json_decoder: Phoenix.json_library()
+    json_decoder: Phoenix.json_library(),
+    body_reader: {VectorWeb.CacheBodyReader, :read_body, []}
 
   plug Plug.MethodOverride
   plug Plug.Head
