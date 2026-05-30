@@ -61,7 +61,13 @@ defmodule Vector.Tournaments.Tournament do
   def statuses, do: @statuses
 
   defp put_invite_code(changeset) do
-    code = :crypto.strong_rand_bytes(4) |> Base.url_encode64(padding: false)
-    put_change(changeset, :invite_code, code)
+    put_change(changeset, :invite_code, generate_invite_code())
+  end
+
+  defp generate_invite_code do
+    chars = ~c"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    for _ <- 1..8, into: "" do
+      <<Enum.at(chars, :rand.uniform(length(chars)) - 1)>>
+    end
   end
 end

@@ -1,9 +1,12 @@
 defmodule Vector.Tournaments do
   import Ecto.Query
   alias Vector.Repo
+  alias Vector.Accounts.User
   alias Vector.Tournaments.{Tournament, TournamentParticipant}
   alias Vector.Payments
   alias Vector.Notifications
+
+  @max_created_tournaments 2
 
   # ── Queries ────────────────────────────────────────────────────────────────
 
@@ -21,8 +24,9 @@ defmodule Vector.Tournaments do
 
   def get_tournament_by_invite(code) do
     Tournament
+    |> where([t], fragment("UPPER(?)", t.invite_code) == ^String.upcase(code))
     |> preload([:creator, participants: :user])
-    |> Repo.get_by(invite_code: code)
+    |> Repo.one()
   end
 
   def list_tournaments(opts \\ []) do
@@ -49,23 +53,59 @@ defmodule Vector.Tournaments do
     |> Repo.all()
   end
 
+  # Tournaments waiting for a second player (pending, 1 participant)
+  def list_waiting_tournaments(opts \\ []) do
+    limit = Keyword.get(opts, :limit, 20)
+
+    waiting_ids =
+      TournamentParticipant
+      |> group_by([p], p.tournament_id)
+      |> having([p], count(p.id) == 1)
+      |> select([p], p.tournament_id)
+      |> Repo.all()
+
+    Tournament
+    |> where([t], t.id in ^waiting_ids and t.status == "pending")
+    |> order_by([t], desc: t.inserted_at)
+    |> preload([:creator, participants: :user])
+    |> limit(^limit)
+    |> Repo.all()
+  end
+
   # ── Mutations ──────────────────────────────────────────────────────────────
 
   def create_tournament(creator, attrs) do
-    attrs = Map.put(attrs, :creator_id, creator.id)
+    entry_fee = parse_decimal(attrs[:entry_fee] || attrs["entry_fee"])
 
-    Repo.transaction(fn ->
-      with {:ok, tournament} <-
-             %Tournament{} |> Tournament.create_changeset(attrs) |> Repo.insert(),
-           {:ok, _} <- add_participant(tournament, creator),
-           {:ok, transaction} <-
-             Payments.create_entry_fee_transaction(creator, tournament) do
-        loaded = get_tournament!(tournament.id)
-        {loaded, transaction}
-      else
-        {:error, reason} -> Repo.rollback(reason)
-      end
-    end)
+    if creator_active_count(creator.id) >= @max_created_tournaments do
+      {:error, :tournament_limit_reached}
+    else
+      attrs = Map.put(attrs, :creator_id, creator.id)
+
+      Repo.transaction(fn ->
+        # Lock the user row and verify funds BEFORE writing any tournament record.
+        # Nothing is inserted until we confirm the balance is sufficient under the lock.
+        fresh_creator =
+          from(u in User, where: u.id == ^creator.id, lock: "FOR UPDATE")
+          |> Repo.one!()
+
+        if Decimal.lt?(fresh_creator.balance, entry_fee) do
+          Repo.rollback(:insufficient_balance)
+        end
+
+        with {:ok, tournament} <-
+               %Tournament{} |> Tournament.create_changeset(attrs) |> Repo.insert(),
+             {:ok, _} <- add_participant(tournament, fresh_creator),
+             {:ok, _tx} <- Payments.deduct_entry_fee(fresh_creator, tournament),
+             {:ok, _} <- update_prize_pool(tournament) do
+          loaded = get_tournament!(tournament.id)
+          updated_creator = Vector.Accounts.get_user!(creator.id)
+          {loaded, updated_creator}
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+    end
   end
 
   def join_tournament(tournament, user) do
@@ -81,10 +121,21 @@ defmodule Vector.Tournaments do
 
       true ->
         Repo.transaction(fn ->
-          with {:ok, _participant} <- add_participant(tournament, user),
-               {:ok, transaction} <-
-                 Payments.create_entry_fee_transaction(user, tournament) do
-            transaction
+          # Lock user row and verify balance BEFORE adding the participant record.
+          # If funds are insufficient, no DB record is written for this join attempt.
+          fresh_user =
+            from(u in User, where: u.id == ^user.id, lock: "FOR UPDATE")
+            |> Repo.one!()
+
+          if Decimal.lt?(fresh_user.balance, tournament.entry_fee) do
+            Repo.rollback(:insufficient_balance)
+          end
+
+          with {:ok, _participant} <- add_participant(tournament, fresh_user),
+               {:ok, _tx} <- Payments.deduct_entry_fee(fresh_user, tournament),
+               {:ok, _} <- update_prize_pool(tournament) do
+            updated_user = Vector.Accounts.get_user!(user.id)
+            {tournament, updated_user}
           else
             {:error, reason} -> Repo.rollback(reason)
           end
@@ -138,10 +189,11 @@ defmodule Vector.Tournaments do
 
   def cancel_tournament(tournament) do
     Repo.transaction(fn ->
-      with {:ok, tournament} <-
-             tournament |> Tournament.cancel_changeset() |> Repo.update() do
-        Payments.refund_tournament_participants(tournament)
-        tournament
+      with {:ok, updated} <- tournament |> Tournament.cancel_changeset() |> Repo.update(),
+           :ok <- Payments.refund_tournament_participants(updated) do
+        updated
+      else
+        {:error, reason} -> Repo.rollback(reason)
       end
     end)
   end
@@ -154,7 +206,6 @@ defmodule Vector.Tournaments do
         {:error, :not_found}
 
       participant ->
-        prize_pool_update(tournament_id)
         participant |> TournamentParticipant.paid_changeset() |> Repo.update()
     end
   end
@@ -166,15 +217,17 @@ defmodule Vector.Tournaments do
     |> TournamentParticipant.changeset(%{
       tournament_id: tournament.id,
       user_id: user.id,
-      seat: seat
+      seat: seat,
+      paid_at: DateTime.utc_now() |> DateTime.truncate(:second)
     })
     |> Repo.insert()
   end
 
-  defp prize_pool_update(tournament_id) do
-    tournament = get_tournament!(tournament_id)
-    new_pool = Decimal.add(tournament.prize_pool, tournament.entry_fee)
-    tournament |> Ecto.Changeset.change(prize_pool: new_pool) |> Repo.update()
+  defp update_prize_pool(tournament) do
+    fresh = get_tournament!(tournament.id)
+    paid_count = paid_participant_count(tournament.id)
+    new_pool = Decimal.mult(fresh.entry_fee, paid_count)
+    fresh |> Ecto.Changeset.change(prize_pool: new_pool) |> Repo.update()
   end
 
   defp participant_count(tournament_id) do
@@ -202,4 +255,15 @@ defmodule Vector.Tournaments do
       participant -> participant.user_id
     end
   end
+
+  defp creator_active_count(user_id) do
+    Tournament
+    |> where(creator_id: ^user_id)
+    |> where([t], t.status in ["pending", "active"])
+    |> Repo.aggregate(:count)
+  end
+
+  defp parse_decimal(nil), do: Decimal.new(0)
+  defp parse_decimal(v) when is_binary(v), do: Decimal.new(v)
+  defp parse_decimal(v), do: Decimal.new("#{v}")
 end
