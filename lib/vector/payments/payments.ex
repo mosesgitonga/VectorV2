@@ -97,47 +97,111 @@ defmodule Vector.Payments do
         {:error, "Maximum single withdrawal is KES #{@max_withdrawal}"}
 
       true ->
-        Repo.transaction(fn ->
-          # Lock the user row first — all balance and rate-limit checks
-          # happen under this lock so two concurrent requests can't both pass.
-          fresh_user =
-            from(u in User, where: u.id == ^user.id, lock: "FOR UPDATE")
-            |> Repo.one!()
+        # Phase 1: lock user row, check balance + rate limit, deduct, record pending tx.
+        # HTTP call to Paystack happens OUTSIDE the DB transaction.
+        case reserve_withdrawal(user, amount_dec) do
+          {:ok, tx} ->
+            case send_paystack_transfer(user, amount_dec, tx) do
+              {:ok, updated_tx} ->
+                {:ok, updated_tx}
 
-          if Decimal.lt?(fresh_user.balance, amount_dec) do
-            Repo.rollback(:insufficient_balance)
-          end
+              {:error, reason} ->
+                reverse_withdrawal(user.id, amount_dec, tx)
+                {:error, reason}
+            end
 
-          # Sum of successful withdrawals by this user in the last 10 minutes.
-          # Done inside the locked transaction so the check is serialised.
-          already_withdrawn = withdrawn_in_window(fresh_user.id)
-          projected_total   = Decimal.add(already_withdrawn, amount_dec)
-
-          if Decimal.gt?(projected_total, @max_withdrawal) do
-            remaining = Decimal.sub(@max_withdrawal, already_withdrawn) |> Decimal.max(Decimal.new("0"))
-            Repo.rollback({:rate_limited, remaining})
-          end
-
-          with {:ok, _} <-
-                 fresh_user |> User.deduct_balance_changeset(amount_dec) |> Repo.update(),
-               {:ok, tx} <-
-                 %Transaction{}
-                 |> Transaction.changeset(%{
-                   user_id: fresh_user.id,
-                   type: "withdrawal",
-                   amount: amount_dec,
-                   paystack_reference: unique_reference(),
-                   status: "success",
-                   metadata: %{note: "Wallet withdrawal"}
-                 })
-                 |> Repo.insert() do
-            Logger.info("Withdrawal processed", user_id: fresh_user.id, amount: amount_dec)
-            tx
-          else
-            {:error, reason} -> Repo.rollback(reason)
-          end
-        end)
+          {:error, _} = err ->
+            err
+        end
     end
+  end
+
+  defp reserve_withdrawal(user, amount_dec) do
+    Repo.transaction(fn ->
+      fresh_user =
+        from(u in User, where: u.id == ^user.id, lock: "FOR UPDATE")
+        |> Repo.one!()
+
+      if Decimal.lt?(fresh_user.balance, amount_dec) do
+        Repo.rollback(:insufficient_balance)
+      end
+
+      already_withdrawn = withdrawn_in_window(fresh_user.id)
+      projected_total   = Decimal.add(already_withdrawn, amount_dec)
+
+      if Decimal.gt?(projected_total, @max_withdrawal) do
+        remaining = Decimal.sub(@max_withdrawal, already_withdrawn) |> Decimal.max(Decimal.new("0"))
+        Repo.rollback({:rate_limited, remaining})
+      end
+
+      with {:ok, _} <- fresh_user |> User.deduct_balance_changeset(amount_dec) |> Repo.update(),
+           {:ok, tx} <-
+             %Transaction{}
+             |> Transaction.changeset(%{
+               user_id: fresh_user.id,
+               type: "withdrawal",
+               amount: amount_dec,
+               paystack_reference: unique_reference(),
+               status: "pending",
+               metadata: %{"phone" => user.phone_number}
+             })
+             |> Repo.insert() do
+        tx
+      else
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+  end
+
+  defp send_paystack_transfer(user, _amount_dec, tx) do
+    amount_kobo = to_kobo(tx.amount)
+    name = user.name || user.email
+
+    with {:ok, recipient_resp} <- Paystack.create_mobile_money_recipient(name, user.phone_number),
+         recipient_code when is_binary(recipient_code) <-
+           get_in(recipient_resp, ["data", "recipient_code"]),
+         {:ok, transfer_resp} <-
+           Paystack.initiate_transfer(amount_kobo, recipient_code, "Vector wallet withdrawal") do
+      transfer_code = get_in(transfer_resp, ["data", "transfer_code"])
+      transfer_status = get_in(transfer_resp, ["data", "status"])
+
+      tx_status = if transfer_status == "success", do: "success", else: "pending"
+
+      updated_tx =
+        tx
+        |> Ecto.Changeset.change(
+          status: tx_status,
+          metadata: Map.merge(tx.metadata || %{}, %{"transfer_code" => transfer_code})
+        )
+        |> Repo.update!()
+
+      Logger.info("Paystack transfer initiated", user_id: user.id, transfer_code: transfer_code, status: tx_status)
+      {:ok, updated_tx}
+    else
+      nil ->
+        {:error, "Could not create transfer recipient. Check phone number."}
+
+      {:error, %{"message" => msg}} ->
+        Logger.error("Paystack transfer failed", user_id: user.id, reason: msg)
+        {:error, msg}
+
+      {:error, reason} ->
+        Logger.error("Paystack transfer failed", user_id: user.id, reason: inspect(reason))
+        {:error, "Transfer failed. Please try again."}
+    end
+  end
+
+  defp reverse_withdrawal(user_id, amount_dec, tx) do
+    Logger.warning("Reversing failed withdrawal reservation", user_id: user_id, tx_id: tx.id)
+
+    Repo.transaction(fn ->
+      fresh_user =
+        from(u in User, where: u.id == ^user_id, lock: "FOR UPDATE")
+        |> Repo.one!()
+
+      fresh_user |> User.credit_balance_changeset(amount_dec) |> Repo.update!()
+      tx |> Transaction.fail_changeset() |> Repo.update!()
+    end)
   end
 
   # Returns the remaining KES a user can withdraw in the current window.
@@ -285,13 +349,54 @@ defmodule Vector.Payments do
     confirm_payment(reference)
   end
 
+  defp process_event("transfer.success", data) do
+    handle_transfer_event(data["transfer_code"], :success)
+  end
+
+  defp process_event("transfer.failed", %{"transfer_code" => tc}), do: handle_transfer_event(tc, :failed)
+  defp process_event("transfer.reversed", %{"transfer_code" => tc}), do: handle_transfer_event(tc, :failed)
+
   defp process_event(_event, _data), do: :ok
+
+  defp handle_transfer_event(transfer_code, outcome) when is_binary(transfer_code) do
+    tx =
+      Transaction
+      |> where([t], t.type == "withdrawal" and t.status == "pending")
+      |> where([t], fragment("?->>'transfer_code' = ?", t.metadata, ^transfer_code))
+      |> Repo.one()
+
+    case {tx, outcome} do
+      {nil, _} ->
+        :ok
+
+      {tx, :success} ->
+        tx |> Ecto.Changeset.change(status: "success") |> Repo.update()
+        Logger.info("Transfer confirmed via webhook", transfer_code: transfer_code)
+        :ok
+
+      {tx, :failed} ->
+        Repo.transaction(fn ->
+          fresh_user =
+            from(u in User, where: u.id == ^tx.user_id, lock: "FOR UPDATE")
+            |> Repo.one!()
+
+          fresh_user |> User.credit_balance_changeset(tx.amount) |> Repo.update!()
+          tx |> Transaction.fail_changeset() |> Repo.update!()
+        end)
+
+        Logger.warning("Transfer failed via webhook, balance refunded", transfer_code: transfer_code)
+        :ok
+    end
+  end
+
+  defp handle_transfer_event(_transfer_code, _outcome), do: :ok
 
   defp withdrawn_in_window(user_id) do
     window_start = DateTime.utc_now() |> DateTime.add(-@withdrawal_window_secs, :second)
 
     Transaction
-    |> where(user_id: ^user_id, type: "withdrawal", status: "success")
+    |> where(user_id: ^user_id, type: "withdrawal")
+    |> where([t], t.status in ["pending", "success"])
     |> where([t], t.inserted_at >= ^window_start)
     |> Repo.aggregate(:sum, :amount)
     |> then(&(&1 || Decimal.new("0")))

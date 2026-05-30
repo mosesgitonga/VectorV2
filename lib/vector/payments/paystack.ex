@@ -23,6 +23,18 @@ defmodule Vector.Payments.Paystack do
     post("/refund", body)
   end
 
+  def create_mobile_money_recipient(name, phone, bank_code \\ "MPESA") do
+    body = %{
+      type: "mobile_money",
+      name: name,
+      account_number: phone,
+      bank_code: bank_code,
+      currency: "KES"
+    }
+
+    post("/transferrecipient", body)
+  end
+
   def transfer_recipient(name, account_number, bank_code) do
     body = %{
       type: "nuban",
