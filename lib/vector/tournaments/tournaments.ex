@@ -120,26 +120,36 @@ defmodule Vector.Tournaments do
         {:error, :already_joined}
 
       true ->
-        Repo.transaction(fn ->
-          # Lock user row and verify balance BEFORE adding the participant record.
-          # If funds are insufficient, no DB record is written for this join attempt.
-          fresh_user =
-            from(u in User, where: u.id == ^user.id, lock: "FOR UPDATE")
-            |> Repo.one!()
+        result =
+          Repo.transaction(fn ->
+            fresh_user =
+              from(u in User, where: u.id == ^user.id, lock: "FOR UPDATE")
+              |> Repo.one!()
 
-          if Decimal.lt?(fresh_user.balance, tournament.entry_fee) do
-            Repo.rollback(:insufficient_balance)
-          end
+            if Decimal.lt?(fresh_user.balance, tournament.entry_fee) do
+              Repo.rollback(:insufficient_balance)
+            end
 
-          with {:ok, _participant} <- add_participant(tournament, fresh_user),
-               {:ok, _tx} <- Payments.deduct_entry_fee(fresh_user, tournament),
-               {:ok, _} <- update_prize_pool(tournament) do
-            updated_user = Vector.Accounts.get_user!(user.id)
-            {tournament, updated_user}
-          else
-            {:error, reason} -> Repo.rollback(reason)
-          end
-        end)
+            with {:ok, _participant} <- add_participant(tournament, fresh_user),
+                 {:ok, _tx} <- Payments.deduct_entry_fee(fresh_user, tournament),
+                 {:ok, _} <- update_prize_pool(tournament) do
+              updated_user = Vector.Accounts.get_user!(user.id)
+              {tournament, updated_user}
+            else
+              {:error, reason} -> Repo.rollback(reason)
+            end
+          end)
+
+        case result do
+          {:ok, {_t, updated_user}} ->
+            # Start the game now that both players have paid.
+            # confirm_payment_and_start is a no-op if not all paid yet.
+            confirm_payment_and_start(tournament.id)
+            {:ok, {get_tournament!(tournament.id), updated_user}}
+
+          err ->
+            err
+        end
     end
   end
 
