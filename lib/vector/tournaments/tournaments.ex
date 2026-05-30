@@ -158,19 +158,25 @@ defmodule Vector.Tournaments do
     paid_count = paid_participant_count(tournament_id)
 
     if paid_count >= tournament.max_players do
+      # Extract player IDs now while participants are preloaded.
+      # The with-clause below rebinds `tournament` to a bare Repo.update result
+      # which has no associations, so calling get_player_id inside would crash.
+      player_one_id = get_player_id(tournament, 1)
+      player_two_id = get_player_id(tournament, 2)
+
       Repo.transaction(fn ->
-        with {:ok, tournament} <-
+        with {:ok, started} <-
                tournament |> Tournament.start_changeset() |> Repo.update(),
              {:ok, session} <-
                Vector.Games.create_session(%{
-                 tournament_id: tournament.id,
-                 player_one_id: get_player_id(tournament, 1),
-                 player_two_id: get_player_id(tournament, 2),
-                 game_type: tournament.game_type
+                 tournament_id: started.id,
+                 player_one_id: player_one_id,
+                 player_two_id: player_two_id,
+                 game_type: started.game_type
                }),
              {:ok, _} <- Vector.Games.start_game(session.id) do
-          Notifications.send_game_started_email(tournament)
-          tournament
+          Notifications.send_game_started_email(started)
+          started
         else
           {:error, reason} -> Repo.rollback(reason)
         end
