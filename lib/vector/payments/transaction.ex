@@ -5,7 +5,7 @@ defmodule Vector.Payments.Transaction do
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
 
-  @types ~w(entry_fee payout refund)
+  @types ~w(deposit entry_fee payout refund withdrawal)
   @statuses ~w(pending success failed refunded)
 
   schema "transactions" do
@@ -24,7 +24,7 @@ defmodule Vector.Payments.Transaction do
 
   def changeset(transaction, attrs) do
     transaction
-    |> cast(attrs, [:user_id, :tournament_id, :type, :amount, :paystack_reference,
+    |> cast(attrs, [:user_id, :tournament_id, :type, :amount, :status, :paystack_reference,
                     :paystack_access_code, :metadata])
     |> validate_required([:user_id, :type, :amount])
     |> validate_inclusion(:type, @types)
