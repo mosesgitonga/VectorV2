@@ -29,7 +29,11 @@ defmodule VectorWeb.GameChannel do
 
     case GameServer.get_state(session_id) do
       {:ok, state} ->
-        push(socket, "game_state", %{state: state.game_state})
+        push(socket, "game_state", %{
+          state:       state.game_state,
+          timing:      state.timing,
+          move_history: (state.session.move_history || []),
+        })
 
       _ ->
         :ok
@@ -46,10 +50,11 @@ defmodule VectorWeb.GameChannel do
     case GameServer.make_move(session_id, user_id, move) do
       {:ok, result} ->
         broadcast!(socket, "move_made", %{
-          move: move,
-          state: result.state,
+          move:     move,
+          state:    result.state,
           game_over: result.game_over,
-          result: Map.get(result, :result)
+          result:   Map.get(result, :result),
+          timing:   Map.get(result, :timing),
         })
 
         {:reply, {:ok, result}, socket}

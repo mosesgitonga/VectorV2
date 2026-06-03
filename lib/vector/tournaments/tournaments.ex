@@ -53,23 +53,20 @@ defmodule Vector.Tournaments do
     |> Repo.all()
   end
 
-  # Tournaments waiting for a second player (pending, 1 participant)
+  # Tournaments waiting for a second player (pending, exactly 1 participant)
   def list_waiting_tournaments(opts \\ []) do
     limit = Keyword.get(opts, :limit, 20)
 
-    waiting_ids =
-      TournamentParticipant
-      |> group_by([p], p.tournament_id)
-      |> having([p], count(p.id) == 1)
-      |> select([p], p.tournament_id)
-      |> Repo.all()
-
     Tournament
-    |> where([t], t.id in ^waiting_ids and t.status == "pending")
-    |> order_by([t], desc: t.inserted_at)
-    |> preload([:creator, participants: :user])
+    |> join(:inner, [t], p in assoc(t, :participants))
+    |> where([t, _p], t.status == "pending")
+    |> group_by([t, _p], t.id)
+    |> having([_t, p], count(p.id) == 1)
+    |> order_by([t, _p], desc: t.inserted_at)
+    |> select([t, _p], t)
     |> limit(^limit)
     |> Repo.all()
+    |> Repo.preload([:creator, participants: :user])
   end
 
   # ── Mutations ──────────────────────────────────────────────────────────────
