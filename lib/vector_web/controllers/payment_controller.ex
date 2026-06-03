@@ -23,14 +23,21 @@ defmodule VectorWeb.PaymentController do
   end
 
   def verify(conn, %{"reference" => reference}) do
-    case Payments.confirm_payment(reference) do
-      {:ok, _transaction} ->
-        json(conn, %{message: "Payment confirmed"})
+    user = conn.assigns.current_user
 
-      {:error, reason} ->
-        conn
-        |> put_status(:bad_request)
-        |> json(%{error: to_string(reason)})
+    # Verify ownership before confirming — prevents User A triggering credit for User B.
+    case Vector.Repo.get_by(Vector.Payments.Transaction, paystack_reference: reference) do
+      nil ->
+        conn |> put_status(:not_found) |> json(%{error: "Transaction not found"})
+
+      %{user_id: uid} when uid != user.id ->
+        conn |> put_status(:forbidden) |> json(%{error: "Forbidden"})
+
+      _tx ->
+        case Payments.confirm_payment(reference) do
+          {:ok, _transaction} -> json(conn, %{message: "Payment confirmed"})
+          {:error, reason}    -> conn |> put_status(:bad_request) |> json(%{error: to_string(reason)})
+        end
     end
   end
 

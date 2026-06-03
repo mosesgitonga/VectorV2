@@ -230,16 +230,25 @@ defmodule Vector.Payments do
   def confirm_payment(reference) do
     with {:ok, response} <- Paystack.verify_transaction(reference),
          %{"data" => %{"status" => "success"}} <- response do
-      case Repo.get_by(Transaction, paystack_reference: reference) do
-        nil ->
-          {:error, :transaction_not_found}
+      # Atomic update — only transitions pending → success.
+      # Guards against duplicate webhook deliveries and concurrent /verify calls.
+      {count, [transaction]} =
+        Transaction
+        |> where(paystack_reference: ^reference, status: "pending")
+        |> select([t], t)
+        |> Repo.update_all(set: [status: "success"])
 
-        transaction ->
-          with {:ok, transaction} <-
-                 transaction |> Transaction.confirm_changeset(reference) |> Repo.update() do
-            handle_confirmed_transaction(transaction)
-            {:ok, transaction}
+      case count do
+        0 ->
+          # Already confirmed (idempotent) — succeed silently
+          case Repo.get_by(Transaction, paystack_reference: reference) do
+            nil -> {:error, :transaction_not_found}
+            tx  -> {:ok, tx}
           end
+
+        1 ->
+          handle_confirmed_transaction(transaction)
+          {:ok, transaction}
       end
     else
       _ -> {:error, :payment_not_successful}
@@ -279,15 +288,18 @@ defmodule Vector.Payments do
       |> where(tournament_id: ^tournament.id, type: "entry_fee", status: "success")
       |> Repo.all()
 
-    Enum.reduce_while(transactions, :ok, fn tx, _acc ->
-      user = from(u in User, where: u.id == ^tx.user_id, lock: "FOR UPDATE") |> Repo.one!()
+    # All-or-nothing: if any refund step fails the whole batch rolls back.
+    Repo.transaction(fn ->
+      Enum.each(transactions, fn tx ->
+        user = from(u in User, where: u.id == ^tx.user_id, lock: "FOR UPDATE") |> Repo.one!()
 
-      with {:ok, _} <- user |> User.credit_balance_changeset(tx.amount) |> Repo.update(),
-           {:ok, _} <- tx |> Transaction.refund_changeset() |> Repo.update() do
-        {:cont, :ok}
-      else
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
+        with {:ok, _} <- user |> User.credit_balance_changeset(tx.amount) |> Repo.update(),
+             {:ok, _} <- tx |> Transaction.refund_changeset() |> Repo.update() do
+          :ok
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
     end)
   end
 

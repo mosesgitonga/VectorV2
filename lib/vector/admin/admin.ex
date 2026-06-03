@@ -62,7 +62,7 @@ defmodule Vector.Admin do
     Transaction
     |> where([t], t.inserted_at >= ^from_date and t.type == "entry_fee" and t.status == "success")
     |> Repo.aggregate(:sum, :amount)
-    |> Decimal.mult(Decimal.new("0.15"))
+    |> then(&(if &1, do: Decimal.mult(&1, Decimal.new("0.15")), else: Decimal.new("0")))
   end
 
   # ── Helpers ────────────────────────────────────────────────────────────────

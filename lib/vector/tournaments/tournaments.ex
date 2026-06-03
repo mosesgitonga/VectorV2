@@ -157,7 +157,7 @@ defmodule Vector.Tournaments do
     tournament = get_tournament!(tournament_id)
     paid_count = paid_participant_count(tournament_id)
 
-    if paid_count >= tournament.max_players do
+    if paid_count >= tournament.max_players and tournament.status == "pending" do
       # Extract player IDs now while participants are preloaded.
       # The with-clause below rebinds `tournament` to a bare Repo.update result
       # which has no associations, so calling get_player_id inside would crash.
@@ -188,7 +188,7 @@ defmodule Vector.Tournaments do
 
   def on_game_finished(session) do
     tournament = get_tournament!(session.tournament_id)
-    winner_id = session.winner_id
+    winner_id  = session.winner_id
 
     if winner_id do
       Repo.transaction(fn ->
@@ -198,6 +198,14 @@ defmodule Vector.Tournaments do
           Payments.pay_winner(winner_id, tournament, prize)
           Notifications.send_game_result_email(tournament, winner_id)
           tournament
+        end
+      end)
+    else
+      # Draw — mark finished with no winner and refund both players' entry fees.
+      Repo.transaction(fn ->
+        with {:ok, updated} <- tournament |> Tournament.finish_changeset(nil) |> Repo.update() do
+          Payments.refund_tournament_participants(updated)
+          updated
         end
       end)
     end

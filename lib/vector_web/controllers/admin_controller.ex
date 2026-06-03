@@ -85,7 +85,7 @@ defmodule VectorWeb.AdminController do
   end
 
   def revenue(conn, params) do
-    days = parse_int(params["days"], 30)
+    days   = min(parse_int(params["days"], 30), 365)
     amount = Admin.get_revenue_by_period(days)
     json(conn, %{revenue: amount, period_days: days})
   end
@@ -105,11 +105,13 @@ defmodule VectorWeb.AdminController do
     }
   end
 
+  @max_limit 100
+
   defp parse_int(nil, default), do: default
   defp parse_int(val, default) do
-    case Integer.parse(val) do
-      {n, _} -> n
-      :error -> default
+    case Integer.parse(to_string(val)) do
+      {n, _} -> min(max(n, 0), @max_limit)
+      :error  -> default
     end
   end
 

@@ -57,7 +57,8 @@ defmodule VectorWeb.AuthController do
       {:ok, token, _claims} = Guardian.encode_and_sign(user)
 
       frontend_url = Application.get_env(:vector, :app_url, "http://localhost:3000")
-      redirect(conn, external: "#{frontend_url}/auth/callback?token=#{token}")
+      # Token in fragment — not sent to servers in Referer headers and not stored in access logs
+      redirect(conn, external: "#{frontend_url}/auth/callback#token=#{token}")
     else
       {:error, reason} ->
         conn

@@ -28,7 +28,8 @@ guardian_secret =
   end
 
 config :vector, Vector.Accounts.Guardian,
-  secret_key: guardian_secret
+  secret_key: guardian_secret,
+  token_ttl: %{"typ" => {"access", {24, :hours}}}
 
 # Swoosh uses SMTP (gen_smtp) — no HTTP API client needed
 config :swoosh, :api_client, false
@@ -67,10 +68,12 @@ if config_env() == :prod do
     tls: :always,
     auth: :always
 
-  frontend_url = System.get_env("FRONTEND_URL", "*")
+  frontend_url =
+    System.get_env("FRONTEND_URL") ||
+      raise "environment variable FRONTEND_URL is missing."
 
   config :cors_plug,
-    origin: (if frontend_url == "*", do: "*", else: [frontend_url]),
+    origin: [frontend_url],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     headers: ["Authorization", "Content-Type", "Accept", "Origin"],
     max_age: 86400

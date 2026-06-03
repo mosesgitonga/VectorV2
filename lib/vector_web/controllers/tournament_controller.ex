@@ -41,16 +41,10 @@ defmodule VectorWeb.TournamentController do
     }
 
     case Tournaments.create_tournament(user, attrs) do
-      {:ok, {tournament, transaction}} ->
+      {:ok, {tournament, updated_user}} ->
         conn
         |> put_status(:created)
-        |> json(%{
-          tournament: tournament_json(tournament),
-          payment: %{
-            access_code: transaction.paystack_access_code,
-            reference: transaction.paystack_reference
-          }
-        })
+        |> json(%{tournament: tournament_json(tournament), balance: updated_user.balance})
 
       {:error, %Ecto.Changeset{} = changeset} ->
         conn
@@ -73,21 +67,42 @@ defmodule VectorWeb.TournamentController do
 
       tournament ->
         case Tournaments.join_tournament(tournament, user) do
-          {:ok, transaction} ->
-            json(conn, %{
-              tournament: tournament_json(tournament),
-              payment: %{
-                access_code: transaction.paystack_access_code,
-                reference: transaction.paystack_reference
-              }
-            })
+          {:ok, {refreshed_tournament, updated_user}} ->
+            json(conn, %{tournament: tournament_json(refreshed_tournament), balance: updated_user.balance})
 
           {:error, reason} ->
             conn
             |> put_status(:unprocessable_entity)
-            |> json(%{error: to_string(reason)})
+            |> json(%{error: format_error(reason)})
         end
     end
+  end
+
+  def cancel(conn, %{"id" => id}) do
+    user = conn.assigns.current_user
+
+    case Tournaments.get_tournament(id) do
+      nil ->
+        conn |> put_status(:not_found) |> json(%{error: "Tournament not found"})
+
+      tournament when tournament.creator_id != user.id ->
+        conn |> put_status(:forbidden) |> json(%{error: "Only the creator can cancel"})
+
+      tournament when tournament.status not in ["pending"] ->
+        conn |> put_status(:unprocessable_entity) |> json(%{error: "Cannot cancel a started or finished tournament"})
+
+      tournament ->
+        case Tournaments.cancel_tournament(tournament) do
+          {:ok, _} -> json(conn, %{message: "Tournament cancelled and entry fees refunded"})
+          {:error, _} -> conn |> put_status(:internal_server_error) |> json(%{error: "Failed to cancel"})
+        end
+    end
+  end
+
+  def waiting(conn, params) do
+    limit = parse_int(params["limit"], 20)
+    tournaments = Tournaments.list_waiting_tournaments(limit: limit)
+    json(conn, %{tournaments: Enum.map(tournaments, &tournament_json/1)})
   end
 
   def invite(conn, %{"id" => id, "email" => email}) do
@@ -151,19 +166,32 @@ defmodule VectorWeb.TournamentController do
   end
 
   defp user_brief(nil), do: nil
+  defp user_brief(%Ecto.Association.NotLoaded{}), do: nil
   defp user_brief(u), do: %{id: u.id, name: u.name, avatar_url: u.avatar_url}
+
+  @max_limit 100
 
   defp parse_int(nil, default), do: default
   defp parse_int(val, default) do
-    case Integer.parse(val) do
-      {n, _} -> n
-      :error -> default
+    case Integer.parse(to_string(val)) do
+      {n, _} -> min(max(n, 0), @max_limit)
+      :error  -> default
     end
   end
 
   defp parse_decimal(nil), do: nil
-  defp parse_decimal(val) when is_binary(val), do: Decimal.new(val)
-  defp parse_decimal(val), do: Decimal.new(to_string(val))
+  defp parse_decimal(val) when is_binary(val) do
+    case Decimal.parse(val) do
+      {d, ""} -> d
+      _       -> nil
+    end
+  end
+  defp parse_decimal(val) do
+    case Decimal.parse(to_string(val)) do
+      {d, ""} -> d
+      _       -> nil
+    end
+  end
 
   defp format_errors(changeset) do
     Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->

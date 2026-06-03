@@ -83,6 +83,7 @@ defmodule Vector.Accounts.User do
   defp validate_email(changeset) do
     changeset
     |> validate_required([:email])
+    |> update_change(:email, &String.downcase/1)
     |> validate_format(:email, ~r/^[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/, message: "must be a valid email")
     |> validate_length(:email, max: 160)
     |> unsafe_validate_unique(:email, Vector.Repo)
