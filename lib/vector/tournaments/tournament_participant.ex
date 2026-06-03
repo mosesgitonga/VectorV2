@@ -17,7 +17,7 @@ defmodule Vector.Tournaments.TournamentParticipant do
 
   def changeset(participant, attrs) do
     participant
-    |> cast(attrs, [:tournament_id, :user_id, :seat])
+    |> cast(attrs, [:tournament_id, :user_id, :seat, :paid_at])
     |> validate_required([:tournament_id, :user_id])
     |> unique_constraint([:tournament_id, :user_id])
   end
