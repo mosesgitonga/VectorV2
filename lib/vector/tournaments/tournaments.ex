@@ -6,6 +6,7 @@ defmodule Vector.Tournaments do
   alias Vector.Tournaments.{Tournament, TournamentParticipant}
   alias Vector.Payments
   alias Vector.Notifications
+  alias Vector.Ranks.RankService
 
   @max_created_tournaments 2
 
@@ -75,6 +76,8 @@ defmodule Vector.Tournaments do
   def create_tournament(creator, attrs) do
     entry_fee = parse_decimal(attrs[:entry_fee] || attrs["entry_fee"])
 
+    game_type = attrs[:game_type] || attrs["game_type"] || "chess"
+
     cond do
       creator_active_count(creator.id) >= @max_created_tournaments ->
         {:error, :tournament_limit_reached}
@@ -82,12 +85,22 @@ defmodule Vector.Tournaments do
       has_active_game?(creator.id) ->
         {:error, :active_game_in_progress}
 
+      # Enforce stake limit: entry fee must not exceed creator's rank limit
+      match?({:error, _}, RankService.check_stake_limit(creator, game_type, entry_fee)) ->
+        {:error, elem(RankService.check_stake_limit(creator, game_type, entry_fee), 1)
+                 |> then(fn {rank, next} -> {:stake_limit_exceeded, rank, next} end)}
+
       true ->
-      attrs = Map.put(attrs, :creator_id, creator.id)
+      # Set initial platform cut from creator's rank (updated when player 2 joins)
+      {elo, games} = RankService.player_stats(creator, game_type)
+      creator_rank = RankService.calculate_rank(elo, games, game_type)
+      initial_cut  = RankService.get_platform_cut(creator_rank)
+
+      attrs = attrs
+        |> Map.put(:creator_id, creator.id)
+        |> Map.put(:platform_cut_percent, initial_cut)
 
       Repo.transaction(fn ->
-        # Lock the user row and verify funds BEFORE writing any tournament record.
-        # Nothing is inserted until we confirm the balance is sufficient under the lock.
         fresh_creator =
           from(u in User, where: u.id == ^creator.id, lock: "FOR UPDATE")
           |> Repo.one!()
@@ -125,6 +138,11 @@ defmodule Vector.Tournaments do
       has_active_game?(user.id) ->
         {:error, :active_game_in_progress}
 
+      # Enforce joiner's stake limit
+      match?({:error, _}, RankService.check_stake_limit(user, tournament.game_type, tournament.entry_fee)) ->
+        {:error, {:stake_limit_exceeded,
+                  elem(RankService.check_stake_limit(user, tournament.game_type, tournament.entry_fee), 1)}}
+
       true ->
         result =
           Repo.transaction(fn ->
@@ -136,9 +154,16 @@ defmodule Vector.Tournaments do
               Repo.rollback(:insufficient_balance)
             end
 
+            # Recalculate platform cut using the lower of both players' ranks
+            creator = Vector.Accounts.get_user!(tournament.creator_id)
+            final_cut = RankService.tournament_platform_cut(creator, fresh_user, tournament.game_type)
+
             with {:ok, _participant} <- add_participant(tournament, fresh_user),
                  {:ok, _tx} <- Payments.deduct_entry_fee(fresh_user, tournament),
-                 {:ok, _} <- update_prize_pool(tournament) do
+                 {:ok, _} <- update_prize_pool(tournament),
+                 {:ok, _t} <- tournament
+                              |> Tournament.update_platform_cut_changeset(final_cut)
+                              |> Repo.update() do
               updated_user = Vector.Accounts.get_user!(user.id)
               {tournament, updated_user}
             else
@@ -232,6 +257,10 @@ defmodule Vector.Tournaments do
   end
 
   def on_game_finished(session) do
+    # Update ELO and rank for both players in a separate Task so it doesn't
+    # block or affect the prize payout transaction.
+    Task.start(fn -> RankService.update_rank_after_game(session) end)
+
     tournament = get_tournament!(session.tournament_id)
     winner_id  = session.winner_id
 

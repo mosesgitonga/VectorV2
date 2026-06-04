@@ -15,6 +15,7 @@ defmodule Vector.Application do
       {Finch, name: Vector.Finch},
       {Registry, keys: :unique, name: Vector.GameRegistry},
       Vector.Games.GameSupervisor,
+      Vector.Ranks.InactivityDecayWorker,
       VectorWeb.Endpoint
     ]
 

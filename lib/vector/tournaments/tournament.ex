@@ -7,7 +7,7 @@ defmodule Vector.Tournaments.Tournament do
 
   @statuses ~w(pending active finished cancelled)
   @game_types ~w(chess morris)
-  @payout_percentage Decimal.new("0.85")
+  @default_platform_cut Decimal.new("0.15")
 
   schema "tournaments" do
     field :name, :string
@@ -17,6 +17,7 @@ defmodule Vector.Tournaments.Tournament do
     field :status, :string, default: "pending"
     field :max_players, :integer, default: 2
     field :invite_code, :string
+    field :platform_cut_percent, :decimal, default: Decimal.new("0.15")
     field :started_at, :utc_datetime
     field :finished_at, :utc_datetime
 
@@ -31,13 +32,17 @@ defmodule Vector.Tournaments.Tournament do
 
   def create_changeset(tournament, attrs) do
     tournament
-    |> cast(attrs, [:name, :game_type, :entry_fee, :max_players, :creator_id])
+    |> cast(attrs, [:name, :game_type, :entry_fee, :max_players, :creator_id, :platform_cut_percent])
     |> validate_required([:name, :game_type, :entry_fee, :creator_id])
     |> validate_inclusion(:game_type, @game_types)
     |> validate_number(:entry_fee, greater_than: 0)
     |> validate_number(:max_players, equal_to: 2)
     |> put_change(:status, "pending")
     |> put_invite_code()
+  end
+
+  def update_platform_cut_changeset(tournament, cut_percent) do
+    change(tournament, platform_cut_percent: cut_percent)
   end
 
   def start_changeset(tournament) do
@@ -54,9 +59,13 @@ defmodule Vector.Tournaments.Tournament do
     change(tournament, status: "cancelled")
   end
 
-  def prize_amount(%__MODULE__{prize_pool: pool}) do
-    Decimal.mult(pool, @payout_percentage)
+  def prize_amount(%__MODULE__{prize_pool: pool, platform_cut_percent: cut}) do
+    effective_cut = cut || @default_platform_cut
+    payout = Decimal.sub(Decimal.new("1"), effective_cut)
+    Decimal.mult(pool, payout)
   end
+
+  def platform_cut_percent_default, do: @default_platform_cut
 
   def statuses, do: @statuses
 

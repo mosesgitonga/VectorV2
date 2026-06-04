@@ -22,7 +22,7 @@ defmodule VectorWeb.PaymentController do
     end
   end
 
-  def verify(conn, %{"reference" => reference}) do
+  def verify(conn, %{"reference" => reference}) do 
     user = conn.assigns.current_user
 
     # Verify ownership before confirming — prevents User A triggering credit for User B.

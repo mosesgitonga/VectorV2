@@ -128,6 +128,8 @@ defmodule VectorWeb.TournamentController do
   # ── Private ────────────────────────────────────────────────────────────────
 
   defp tournament_json(t) do
+    alias Vector.Ranks.RankService
+
     %{
       id: t.id,
       name: t.name,
@@ -135,20 +137,44 @@ defmodule VectorWeb.TournamentController do
       entry_fee: t.entry_fee,
       prize_pool: t.prize_pool,
       prize_payout: Tournaments.Tournament.prize_amount(t),
+      platform_cut_percent: t.platform_cut_percent,
       status: t.status,
       invite_code: t.invite_code,
       max_players: t.max_players,
       creator: user_brief(t.creator),
       winner: if(t.winner, do: user_brief(t.winner)),
-      participants: Enum.map(t.participants || [], &participant_json/1),
+      participants: Enum.map(t.participants || [], &participant_json(&1, t.game_type)),
       started_at: t.started_at,
       finished_at: t.finished_at,
       inserted_at: t.inserted_at
     }
   end
 
-  defp participant_json(p) do
-    %{id: p.id, user: user_brief(p.user), paid_at: p.paid_at, seat: p.seat}
+  defp participant_json(p, game_type \\ "chess") do
+    alias Vector.Ranks.RankService
+    rank_data = if p.user && p.user.__struct__ != Ecto.Association.NotLoaded do
+      {elo, games} = RankService.player_stats(p.user, game_type)
+      %{
+        rank:  RankService.calculate_rank(elo, games, game_type),
+        elo:   elo,
+        emoji: case RankService.find_rank(RankService.calculate_rank(elo, games, game_type)) do
+                 nil  -> nil
+                 info -> info.emoji
+               end
+      }
+    else
+      %{rank: nil, elo: nil, emoji: nil}
+    end
+
+    %{
+      id: p.id,
+      user: user_brief(p.user),
+      paid_at: p.paid_at,
+      seat: p.seat,
+      rank: rank_data.rank,
+      elo: rank_data.elo,
+      rank_emoji: rank_data.emoji,
+    }
   end
 
   defp session_json(s) do
@@ -203,6 +229,7 @@ defmodule VectorWeb.TournamentController do
 
   @user_errors %{
     active_game_in_progress:  "You already have a game in progress. Finish it before starting another.",
+    stake_limit_exceeded:     "This tournament exceeds your current stake limit.",
     tournament_limit_reached: "You can only have 2 active tournaments at a time. Cancel or complete one first.",
     insufficient_balance:     "Insufficient wallet balance. Please deposit funds first.",
     tournament_not_open:      "This tournament is no longer accepting players.",
@@ -213,6 +240,17 @@ defmodule VectorWeb.TournamentController do
   }
 
   defp format_error(%{"message" => msg}), do: msg
+  defp format_error({:stake_limit_exceeded, {rank, next_rank}}) do
+    rank_str = rank || "Unranked"
+    case next_rank do
+      nil ->
+        "This tournament exceeds your #{rank_str} stake limit."
+      next ->
+        max_kes = if next.max_pool, do: "KES #{div(next.max_pool, 2)}", else: "unlimited"
+        "This tournament exceeds your #{rank_str} stake limit. " <>
+        "Reach #{next.name} to join #{max_kes} games."
+    end
+  end
   defp format_error(reason) when is_atom(reason),
     do: Map.get(@user_errors, reason, "Something went wrong. Please try again.")
   defp format_error(_), do: "Something went wrong. Please try again."

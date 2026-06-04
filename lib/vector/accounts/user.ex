@@ -18,7 +18,15 @@ defmodule Vector.Accounts.User do
     field :is_active, :boolean, default: true
     field :phone_number, :string
 
+    # ELO + rank (per game type — new game types just need a migration + column)
+    field :elo_chess,           :integer, default: 1200
+    field :elo_morris,          :integer, default: 1200
+    field :games_played_chess,  :integer, default: 0
+    field :games_played_morris, :integer, default: 0
+    field :last_active_at,      :utc_datetime
+
     has_many :email_tokens, Vector.Accounts.EmailToken
+    has_many :rank_histories, Vector.Ranks.RankHistory
     has_many :created_tournaments, Vector.Tournaments.Tournament, foreign_key: :creator_id
     has_many :tournament_participants, Vector.Tournaments.TournamentParticipant
     has_many :transactions, Vector.Payments.Transaction

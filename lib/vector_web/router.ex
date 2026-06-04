@@ -41,6 +41,7 @@ defmodule VectorWeb.Router do
     pipe_through [:api, :authenticated]
 
     get "/auth/me", AuthController, :me
+    get "/ranks/leaderboard", RankController, :leaderboard
     post "/auth/resend-confirmation", AuthController, :resend_confirmation
     put "/auth/phone", AuthController, :update_phone
 

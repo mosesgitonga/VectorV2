@@ -56,7 +56,30 @@
       "Bash(npx tsc *)",
       "Bash(wsl ls *)",
       "Read(///wsl.localhost/Ubuntu/home/moses/**)",
-      "Bash(wsl bash *)"
+      "Bash(wsl bash *)",
+      "Bash(wsl find *)",
+      "Read(//mnt/c/**)",
+      "Bash(wsl -e bash -c \"cd /home/moses/projects/vector-frontend && npx tsc --noEmit 2>&1 | head -60\")",
+      "PowerShell(wsl bash -c \"cd /home/moses/projects/vector-frontend && ./node_modules/.bin/tsc --noEmit 2>&1 | head -60\")",
+      "PowerShell(wsl bash -c \"source ~/.nvm/nvm.sh 2>/dev/null || true; source ~/.profile 2>/dev/null || true; cd /home/moses/projects/vector-frontend && npx tsc --noEmit 2>&1 | head -60\")",
+      "PowerShell(wsl bash -c \"source ~/.nvm/nvm.sh 2>/dev/null; cd /home/moses/projects/vector-frontend && npx tsc --noEmit 2>&1\")",
+      "PowerShell(wsl bash -c \"cat /home/moses/projects/vector-frontend/package.json\")",
+      "PowerShell(wsl bash -c \"source ~/.nvm/nvm.sh 2>/dev/null; cd /home/moses/projects/vector-frontend && npm install chess.js 2>&1 | tail -5\")",
+      "Bash(cd /mnt/c/Users/user/wsl/home/moses/projects/vector-frontend)",
+      "Bash(ls /home/moses/projects/)",
+      "Bash(ls \\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\Ubuntu\\\\\\\\home\\\\\\\\moses\\\\\\\\projects)",
+      "Bash(wsl -e bash -c \"cd /home/moses/projects/vector-frontend && npx tsc --noEmit 2>&1 | head -40\")",
+      "Bash(wsl -e bash -c \"cd /home/moses/projects/vector-frontend && ./node_modules/.bin/tsc --noEmit 2>&1 | head -50\")",
+      "Bash(wsl -e bash -ic \"cd /home/moses/projects/vector-frontend && ./node_modules/.bin/tsc --noEmit 2>&1 | head -50\")",
+      "Bash(wsl -e bash -ic \"find /home/moses/projects/vector-frontend/src -name '*.css' 2>/dev/null\")",
+      "Bash(wsl -e bash -ic \"ls /home/moses/projects/vector-frontend/src/pages/\")",
+      "Bash(wsl -e bash -ic \"ls /home/moses/projects/vector-frontend/src/pages/auth/\")",
+      "Bash(wsl -e bash -ic \"cd /home/moses/projects/vector-frontend && ./node_modules/.bin/tsc --noEmit 2>&1 | head -40\")",
+      "Bash(wsl -e bash -ic \"cd /home/moses/projects/vector-frontend && ./node_modules/.bin/tsc --noEmit 2>&1\")",
+      "Bash(wsl -e bash -ic \"find /home/moses/projects/VectorV2/lib -name '*.ex' | grep -E '\\(game|session\\)' | sort\")",
+      "Bash(wsl -e bash -ic \"ls /home/moses/projects/VectorV2/priv/repo/migrations/\")",
+      "Bash(wsl -e bash -ic \"ls /home/moses/projects/vector-frontend/src/pages/game/ && ls /home/moses/projects/vector-frontend/src/pages/tournament/\")",
+      "Bash(wsl -e bash -ic \"ls /home/moses/projects/VectorV2/priv/repo/migrations/ | tail -1\")"
     ]
   }
 }

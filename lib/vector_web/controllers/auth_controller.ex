@@ -212,6 +212,8 @@ defmodule VectorWeb.AuthController do
   end
 
   defp user_json(user) do
+    alias Vector.Ranks.RankService
+
     %{
       id: user.id,
       email: user.email,
@@ -220,7 +222,10 @@ defmodule VectorWeb.AuthController do
       role: user.role,
       email_confirmed: user.email_confirmed,
       balance: user.balance,
-      phone_number: user.phone_number
+      phone_number: user.phone_number,
+      # ELO + rank (computed per game type)
+      chess:  RankService.rank_summary(user, "chess"),
+      morris: RankService.rank_summary(user, "morris"),
     }
   end
 
