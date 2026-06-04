@@ -160,53 +160,61 @@ defmodule Vector.Tournaments do
   end
 
   def confirm_payment_and_start(tournament_id) do
-    tournament = get_tournament!(tournament_id)
-    paid_count = paid_participant_count(tournament_id)
+    # Phase 1: all DB work under a FOR UPDATE lock so two concurrent callers
+    # cannot both pass the status check and create duplicate game sessions.
+    result = Repo.transaction(fn ->
+      tournament =
+        from(t in Tournament, where: t.id == ^tournament_id, lock: "FOR UPDATE")
+        |> Repo.one!()
 
-    if paid_count >= tournament.max_players and tournament.status == "pending" do
-      player_one_id = get_player_id(tournament, 1)
-      player_two_id = get_player_id(tournament, 2)
+      paid_count = paid_participant_count(tournament_id)
 
-      # Phase 1: DB-only work inside the transaction.
-      # Do NOT spawn GenServer processes inside here — they run on separate
-      # connections and cannot read uncommitted rows, which would crash them
-      # and roll back this transaction.
-      result = Repo.transaction(fn ->
-        with {:ok, started} <-
-               tournament |> Tournament.start_changeset() |> Repo.update(),
-             {:ok, session} <-
-               Vector.Games.create_session(%{
-                 tournament_id: started.id,
-                 player_one_id: player_one_id,
-                 player_two_id: player_two_id,
-                 game_type: started.game_type
-               }) do
-          {started, session}
-        else
-          {:error, reason} -> Repo.rollback(reason)
-        end
-      end)
+      cond do
+        tournament.status != "pending" ->
+          {:already_started}
 
-      # Phase 2: start the GameServer after the transaction has committed
-      # so it can read the game_sessions row from the database.
-      case result do
-        {:ok, {started, session}} ->
-          case Vector.Games.start_game(session.id) do
-            {:ok, _pid} ->
-              Task.start(fn -> Notifications.send_game_started_email(started) end)
-              {:ok, started}
+        paid_count < tournament.max_players ->
+          Repo.rollback(:not_all_paid)
 
-            {:error, reason} ->
-              Logger.error("Failed to start game server after session created",
-                session_id: session.id, reason: inspect(reason))
-              {:error, reason}
+        true ->
+          player_one_id = get_player_id(tournament, 1)
+          player_two_id = get_player_id(tournament, 2)
+
+          with {:ok, started} <- tournament |> Tournament.start_changeset() |> Repo.update(),
+               {:ok, session} <-
+                 Vector.Games.create_session(%{
+                   tournament_id: started.id,
+                   player_one_id: player_one_id,
+                   player_two_id: player_two_id,
+                   game_type: started.game_type
+                 }) do
+            {:new_session, started, session}
+          else
+            {:error, reason} -> Repo.rollback(reason)
           end
-
-        {:error, _} = err ->
-          err
       end
-    else
-      {:error, :not_all_paid}
+    end)
+
+    # Phase 2: start the GameServer after the transaction commits so it can
+    # read the committed game_sessions row on its own DB connection.
+    case result do
+      {:ok, {:already_started}} ->
+        {:error, :not_all_paid}
+
+      {:ok, {:new_session, started, session}} ->
+        case Vector.Games.start_game(session.id) do
+          {:ok, _pid} ->
+            Task.start(fn -> Notifications.send_game_started_email(started) end)
+            {:ok, started}
+
+          {:error, reason} ->
+            Logger.error("Failed to start game server after session created",
+              session_id: session.id, reason: inspect(reason))
+            {:error, reason}
+        end
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -219,17 +227,25 @@ defmodule Vector.Tournaments do
         with {:ok, tournament} <-
                tournament |> Tournament.finish_changeset(winner_id) |> Repo.update() do
           prize = Tournament.prize_amount(tournament)
-          Payments.pay_winner(winner_id, tournament, prize)
-          Task.start(fn -> Notifications.send_game_result_email(tournament, winner_id) end)
-          tournament
+          case Payments.pay_winner(winner_id, tournament, prize) do
+            {:ok, _} ->
+              Task.start(fn -> Notifications.send_game_result_email(tournament, winner_id) end)
+              tournament
+            {:error, reason} ->
+              Repo.rollback(reason)
+          end
+        else
+          {:error, reason} -> Repo.rollback(reason)
         end
       end)
     else
       # Draw — mark finished with no winner and refund both players' entry fees.
       Repo.transaction(fn ->
-        with {:ok, updated} <- tournament |> Tournament.finish_changeset(nil) |> Repo.update() do
-          Payments.refund_tournament_participants(updated)
+        with {:ok, updated} <- tournament |> Tournament.finish_changeset(nil) |> Repo.update(),
+             {:ok, _} <- Payments.refund_tournament_participants(updated) do
           updated
+        else
+          {:error, reason} -> Repo.rollback(reason)
         end
       end)
     end
@@ -238,7 +254,7 @@ defmodule Vector.Tournaments do
   def cancel_tournament(tournament) do
     Repo.transaction(fn ->
       with {:ok, updated} <- tournament |> Tournament.cancel_changeset() |> Repo.update(),
-           :ok <- Payments.refund_tournament_participants(updated) do
+           {:ok, _} <- Payments.refund_tournament_participants(updated) do
         updated
       else
         {:error, reason} -> Repo.rollback(reason)

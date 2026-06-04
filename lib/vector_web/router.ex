@@ -9,6 +9,10 @@ defmodule VectorWeb.Router do
     plug VectorWeb.Plugs.AuthPlug
   end
 
+  pipeline :email_confirmed do
+    plug VectorWeb.Plugs.EmailConfirmedPlug
+  end
+
   pipeline :admin do
     plug VectorWeb.Plugs.AdminPlug
   end
@@ -31,7 +35,7 @@ defmodule VectorWeb.Router do
     post "/webhook", PaymentController, :webhook
   end
 
-  # ── Authenticated routes ───────────────────────────────────────────────────
+  # ── Authenticated routes (no email confirmation required) ─────────────────
 
   scope "/api", VectorWeb do
     pipe_through [:api, :authenticated]
@@ -47,19 +51,27 @@ defmodule VectorWeb.Router do
     get "/tournaments/mine", TournamentController, :my_tournaments
     get "/tournaments/waiting", TournamentController, :waiting
     get "/tournaments/:id", TournamentController, :show
-    post "/tournaments", TournamentController, :create
-    post "/tournaments/join", TournamentController, :join
+    get "/tournaments/:id/sessions", TournamentController, :sessions
     post "/tournaments/:id/invite", TournamentController, :invite
     delete "/tournaments/:id", TournamentController, :cancel
-    get "/tournaments/:id/sessions", TournamentController, :sessions
 
     get "/games/:id", GameController, :show
 
+    get "/payments/withdraw/limit", PaymentController, :withdrawal_limit
+    get "/payments/transactions", PaymentController, :my_transactions
+  end
+
+  # ── Authenticated + email confirmed (financial operations) ─────────────────
+
+  scope "/api", VectorWeb do
+    pipe_through [:api, :authenticated, :email_confirmed]
+
+    post "/tournaments", TournamentController, :create
+    post "/tournaments/join", TournamentController, :join
+
     post "/payments/deposit", PaymentController, :deposit
     post "/payments/withdraw", PaymentController, :withdraw
-    get "/payments/withdraw/limit", PaymentController, :withdrawal_limit
     get "/payments/verify/:reference", PaymentController, :verify
-    get "/payments/transactions", PaymentController, :my_transactions
   end
 
   # ── Admin routes ───────────────────────────────────────────────────────────

@@ -66,8 +66,10 @@ defmodule Vector.Tournaments.Tournament do
 
   defp generate_invite_code do
     chars = ~c"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    for _ <- 1..8, into: "" do
-      <<Enum.at(chars, :rand.uniform(length(chars)) - 1)>>
-    end
+    len   = length(chars)
+    :crypto.strong_rand_bytes(8)
+    |> :binary.bin_to_list()
+    |> Enum.map(&Enum.at(chars, rem(&1, len)))
+    |> List.to_string()
   end
 end

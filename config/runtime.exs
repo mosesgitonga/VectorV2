@@ -31,7 +31,7 @@ guardian_secret =
 
 config :vector, Vector.Accounts.Guardian,
   secret_key: guardian_secret,
-  token_ttl: %{"typ" => {"access", {24, :hours}}}
+  token_ttl: %{"access" => {24, :hours}}
 
 # Swoosh uses SMTP (gen_smtp) — no HTTP API client needed
 config :swoosh, :api_client, false

@@ -57,9 +57,12 @@ defmodule VectorWeb.AuthController do
       {:ok, token, _claims} = Guardian.encode_and_sign(user)
 
       frontend_url = Application.get_env(:vector, :app_url, "http://localhost:3000")
-      # Token in fragment — not sent to servers in Referer headers and not stored in access logs
       redirect(conn, external: "#{frontend_url}/auth/callback#token=#{token}")
     else
+      {:error, :account_disabled} ->
+        frontend_url = Application.get_env(:vector, :app_url, "http://localhost:3000")
+        redirect(conn, external: "#{frontend_url}/login?error=account_disabled")
+
       {:error, _reason} ->
         conn
         |> put_status(:bad_request)
@@ -89,13 +92,15 @@ defmodule VectorWeb.AuthController do
   end
 
   def resend_confirmation(conn, _params) do
-    user = conn.assigns.current_user
+    with :ok <- check_rate(conn, "resend_confirmation") do
+      user = conn.assigns.current_user
 
-    if user.email_confirmed do
-      conn |> put_status(:bad_request) |> json(%{error: "Email already confirmed"})
-    else
-      Accounts.send_confirmation_email(user)
-      json(conn, %{message: "Confirmation email sent"})
+      if user.email_confirmed do
+        conn |> put_status(:bad_request) |> json(%{error: "Email already confirmed"})
+      else
+        Task.start(fn -> Accounts.send_confirmation_email(user) end)
+        json(conn, %{message: "Confirmation email sent"})
+      end
     end
   end
 

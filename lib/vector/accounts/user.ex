@@ -36,11 +36,20 @@ defmodule Vector.Accounts.User do
   end
 
   def google_changeset(user, attrs) do
-    user
-    |> cast(attrs, [:email, :name, :google_id, :avatar_url, :email_confirmed])
-    |> validate_required([:email, :name, :google_id])
-    |> validate_email()
-    |> put_change(:email_confirmed, true)
+    # For new Google users (no password_hash) Google has verified the email.
+    # For existing email/password users, keep their email_confirmed as-is —
+    # forcing true here would let an attacker confirm a victim's email via OAuth.
+    cs =
+      user
+      |> cast(attrs, [:email, :name, :google_id, :avatar_url])
+      |> validate_required([:email, :name, :google_id])
+      |> validate_email()
+
+    if is_nil(user.password_hash) do
+      put_change(cs, :email_confirmed, true)
+    else
+      cs
+    end
   end
 
   def profile_changeset(user, attrs) do

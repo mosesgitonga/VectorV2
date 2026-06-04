@@ -49,11 +49,17 @@ defmodule Vector.Accounts do
 
   def find_or_create_google_user(attrs) do
     case get_user_by_google_id(attrs[:google_id]) do
+      %User{is_active: false} ->
+        {:error, :account_disabled}
+
       %User{} = user ->
         {:ok, user}
 
       nil ->
         case get_user_by_email(attrs[:email]) do
+          %User{is_active: false} ->
+            {:error, :account_disabled}
+
           %User{} = user ->
             user
             |> User.google_changeset(attrs)

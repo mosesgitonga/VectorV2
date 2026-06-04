@@ -230,23 +230,23 @@ defmodule Vector.Payments do
   def confirm_payment(reference) do
     with {:ok, response} <- Paystack.verify_transaction(reference),
          %{"data" => %{"status" => "success"}} <- response do
-      # Atomic update — only transitions pending → success.
-      # Guards against duplicate webhook deliveries and concurrent /verify calls.
-      {count, [transaction]} =
+      # Atomic: only transitions pending → success. Idempotent against duplicate webhooks.
+      # Use two-variable destructure so count=0 (already confirmed) doesn't crash.
+      {count, rows} =
         Transaction
         |> where(paystack_reference: ^reference, status: "pending")
         |> select([t], t)
         |> Repo.update_all(set: [status: "success"])
 
-      case count do
-        0 ->
-          # Already confirmed (idempotent) — succeed silently
+      case {count, rows} do
+        {0, _} ->
+          # Already confirmed — succeed silently (idempotent)
           case Repo.get_by(Transaction, paystack_reference: reference) do
             nil -> {:error, :transaction_not_found}
             tx  -> {:ok, tx}
           end
 
-        1 ->
+        {1, [transaction]} ->
           handle_confirmed_transaction(transaction)
           {:ok, transaction}
       end
