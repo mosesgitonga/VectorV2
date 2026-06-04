@@ -236,31 +236,52 @@ defmodule Vector.Tournaments do
     winner_id  = session.winner_id
 
     if winner_id do
-      Repo.transaction(fn ->
-        with {:ok, tournament} <-
-               tournament |> Tournament.finish_changeset(winner_id) |> Repo.update() do
-          prize = Tournament.prize_amount(tournament)
-          case Payments.pay_winner(winner_id, tournament, prize) do
-            {:ok, _} ->
-              Task.start(fn -> Notifications.send_game_result_email(tournament, winner_id) end)
-              tournament
-            {:error, reason} ->
-              Repo.rollback(reason)
-          end
+      # Step 1: Mark the tournament finished in its own transaction.
+      # This is committed regardless of what happens in step 2, so a payment
+      # failure can never leave the tournament permanently stuck in "active."
+      case Repo.transaction(fn ->
+        with {:ok, t} <- tournament |> Tournament.finish_changeset(winner_id) |> Repo.update() do
+          t
         else
           {:error, reason} -> Repo.rollback(reason)
         end
-      end)
+      end) do
+        {:ok, finished_tournament} ->
+          # Step 2: Pay the winner in a separate transaction.
+          prize = Tournament.prize_amount(finished_tournament)
+          case Payments.pay_winner(winner_id, finished_tournament, prize) do
+            {:ok, _} ->
+              Task.start(fn -> Notifications.send_game_result_email(finished_tournament, winner_id) end)
+            {:error, reason} ->
+              Logger.error("Prize payment failed after tournament finished",
+                tournament_id: finished_tournament.id, reason: inspect(reason))
+          end
+          {:ok, finished_tournament}
+
+        {:error, _} = err ->
+          err
+      end
     else
-      # Draw — mark finished with no winner and refund both players' entry fees.
-      Repo.transaction(fn ->
-        with {:ok, updated} <- tournament |> Tournament.finish_changeset(nil) |> Repo.update(),
-             {:ok, _} <- Payments.refund_tournament_participants(updated) do
+      # Draw — mark finished then refund; separate transactions for same reason.
+      case Repo.transaction(fn ->
+        with {:ok, updated} <- tournament |> Tournament.finish_changeset(nil) |> Repo.update() do
           updated
         else
           {:error, reason} -> Repo.rollback(reason)
         end
-      end)
+      end) do
+        {:ok, finished} ->
+          case Payments.refund_tournament_participants(finished) do
+            {:ok, _} -> :ok
+            {:error, reason} ->
+              Logger.error("Refund failed after draw",
+                tournament_id: finished.id, reason: inspect(reason))
+          end
+          {:ok, finished}
+
+        {:error, _} = err ->
+          err
+      end
     end
   end
 

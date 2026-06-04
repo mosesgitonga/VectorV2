@@ -55,6 +55,7 @@ defmodule VectorWeb.Router do
     post "/tournaments/:id/invite", TournamentController, :invite
     delete "/tournaments/:id", TournamentController, :cancel
 
+    get "/games/active", GameController, :active
     get "/games/:id", GameController, :show
 
     get "/payments/withdraw/limit", PaymentController, :withdrawal_limit

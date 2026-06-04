@@ -5,6 +5,13 @@ defmodule Vector.Games do
 
   def get_session(id), do: Repo.get(GameSession, id)
 
+  def active_session_for(user_id) do
+    GameSession
+    |> where([gs], (gs.player_one_id == ^user_id or gs.player_two_id == ^user_id) and gs.status == "active")
+    |> limit(1)
+    |> Repo.one()
+  end
+
   def get_session!(id), do: Repo.get!(GameSession, id)
 
   def list_sessions_for_tournament(tournament_id) do

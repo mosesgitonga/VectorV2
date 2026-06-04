@@ -3,6 +3,12 @@ defmodule VectorWeb.GameController do
 
   alias Vector.Games
 
+  def active(conn, _params) do
+    user    = conn.assigns.current_user
+    session = Games.active_session_for(user.id)
+    json(conn, %{session: if(session, do: session_json(session), else: nil)})
+  end
+
   def show(conn, %{"id" => id}) do
     case Games.get_session(id) do
       nil ->
