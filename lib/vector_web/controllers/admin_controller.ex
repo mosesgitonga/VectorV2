@@ -67,8 +67,8 @@ defmodule VectorWeb.AdminController do
       {:ok, tournament} ->
         json(conn, %{tournament: tournament, message: "Tournament cancelled and refunds issued"})
 
-      {:error, reason} ->
-        conn |> put_status(:unprocessable_entity) |> json(%{error: inspect(reason)})
+      {:error, _reason} ->
+        conn |> put_status(:unprocessable_entity) |> json(%{error: "Operation failed. Please try again."})
     end
   end
 

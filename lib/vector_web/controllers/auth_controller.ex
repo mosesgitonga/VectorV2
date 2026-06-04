@@ -60,10 +60,10 @@ defmodule VectorWeb.AuthController do
       # Token in fragment — not sent to servers in Referer headers and not stored in access logs
       redirect(conn, external: "#{frontend_url}/auth/callback#token=#{token}")
     else
-      {:error, reason} ->
+      {:error, _reason} ->
         conn
         |> put_status(:bad_request)
-        |> json(%{error: "Google auth failed: #{inspect(reason)}"})
+        |> json(%{error: "Sign-in with Google failed. Please try again."})
     end
   end
 

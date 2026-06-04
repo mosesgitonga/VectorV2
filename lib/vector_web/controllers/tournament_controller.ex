@@ -201,7 +201,18 @@ defmodule VectorWeb.TournamentController do
     end)
   end
 
+  @user_errors %{
+    tournament_limit_reached: "You can only have 2 active tournaments at a time. Cancel or complete one first.",
+    insufficient_balance:     "Insufficient wallet balance. Please deposit funds first.",
+    tournament_not_open:      "This tournament is no longer accepting players.",
+    tournament_full:          "This tournament is already full.",
+    already_joined:           "You have already joined this tournament.",
+    not_a_player:             "You are not a participant in this tournament.",
+    invalid_invite_code:      "Invalid invite code. Please check and try again.",
+  }
+
   defp format_error(%{"message" => msg}), do: msg
-  defp format_error(reason) when is_atom(reason), do: to_string(reason)
-  defp format_error(reason), do: inspect(reason)
+  defp format_error(reason) when is_atom(reason),
+    do: Map.get(@user_errors, reason, "Something went wrong. Please try again.")
+  defp format_error(_), do: "Something went wrong. Please try again."
 end
