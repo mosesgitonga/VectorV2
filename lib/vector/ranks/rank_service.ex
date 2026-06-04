@@ -35,7 +35,7 @@ defmodule Vector.Ranks.RankService do
     %{level: 8, name: "God Mode", emoji: "⚡",  elo_min: 2200, games_min: 500, max_pool: nil,   cut: "0.08"},
   ]
 
-  @unranked_games_threshold 10
+  @unranked_games_threshold 0
   @god_mode_top_percentile  0.01  # top 1% of active players
 
   # ── ELO calculation ────────────────────────────────────────────────────────
