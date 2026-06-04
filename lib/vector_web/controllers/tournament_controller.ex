@@ -202,6 +202,7 @@ defmodule VectorWeb.TournamentController do
   end
 
   @user_errors %{
+    active_game_in_progress:  "You already have a game in progress. Finish it before starting another.",
     tournament_limit_reached: "You can only have 2 active tournaments at a time. Cancel or complete one first.",
     insufficient_balance:     "Insufficient wallet balance. Please deposit funds first.",
     tournament_not_open:      "This tournament is no longer accepting players.",

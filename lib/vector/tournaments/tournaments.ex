@@ -75,9 +75,14 @@ defmodule Vector.Tournaments do
   def create_tournament(creator, attrs) do
     entry_fee = parse_decimal(attrs[:entry_fee] || attrs["entry_fee"])
 
-    if creator_active_count(creator.id) >= @max_created_tournaments do
-      {:error, :tournament_limit_reached}
-    else
+    cond do
+      creator_active_count(creator.id) >= @max_created_tournaments ->
+        {:error, :tournament_limit_reached}
+
+      has_active_game?(creator.id) ->
+        {:error, :active_game_in_progress}
+
+      true ->
       attrs = Map.put(attrs, :creator_id, creator.id)
 
       Repo.transaction(fn ->
@@ -116,6 +121,9 @@ defmodule Vector.Tournaments do
 
       already_participant?(tournament.id, user.id) ->
         {:error, :already_joined}
+
+      has_active_game?(user.id) ->
+        {:error, :active_game_in_progress}
 
       true ->
         result =
@@ -294,6 +302,13 @@ defmodule Vector.Tournaments do
       nil -> nil
       participant -> participant.user_id
     end
+  end
+
+  defp has_active_game?(user_id) do
+    alias Vector.Games.GameSession
+    GameSession
+    |> where([gs], (gs.player_one_id == ^user_id or gs.player_two_id == ^user_id) and gs.status == "active")
+    |> Repo.exists?()
   end
 
   defp creator_active_count(user_id) do
