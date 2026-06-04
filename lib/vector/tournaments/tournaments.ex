@@ -177,8 +177,21 @@ defmodule Vector.Tournaments do
           Repo.rollback(:not_all_paid)
 
         true ->
-          player_one_id = get_player_id(tournament, 1)
-          player_two_id = get_player_id(tournament, 2)
+          # Fetch player IDs with direct queries — the FOR UPDATE query returns
+          # a bare Tournament struct with no associations preloaded, so calling
+          # get_player_id (which enumerates tournament.participants) would crash
+          # with Protocol.UndefinedError on %Ecto.Association.NotLoaded{}.
+          player_one_id =
+            from(p in TournamentParticipant,
+              where: p.tournament_id == ^tournament_id and p.seat == 1,
+              select: p.user_id)
+            |> Repo.one()
+
+          player_two_id =
+            from(p in TournamentParticipant,
+              where: p.tournament_id == ^tournament_id and p.seat == 2,
+              select: p.user_id)
+            |> Repo.one()
 
           with {:ok, started} <- tournament |> Tournament.start_changeset() |> Repo.update(),
                {:ok, session} <-
@@ -311,13 +324,6 @@ defmodule Vector.Tournaments do
     TournamentParticipant
     |> where(tournament_id: ^tournament_id, user_id: ^user_id)
     |> Repo.exists?()
-  end
-
-  defp get_player_id(tournament, seat) do
-    case Enum.find(tournament.participants, &(&1.seat == seat)) do
-      nil -> nil
-      participant -> participant.user_id
-    end
   end
 
   defp has_active_game?(user_id) do

@@ -60,8 +60,10 @@ defmodule VectorWeb.AuthController do
       redirect(conn, external: "#{frontend_url}/auth/callback#token=#{token}")
     else
       {:error, :account_disabled} ->
+        # Use a hash fragment — not sent in Referer headers, not in proxy logs,
+        # and does not confirm to observers which Google account is blocked.
         frontend_url = Application.get_env(:vector, :app_url, "http://localhost:3000")
-        redirect(conn, external: "#{frontend_url}/login?error=account_disabled")
+        redirect(conn, external: "#{frontend_url}/login#auth_error=disabled")
 
       {:error, _reason} ->
         conn
