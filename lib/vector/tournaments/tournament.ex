@@ -33,7 +33,7 @@ defmodule Vector.Tournaments.Tournament do
   def create_changeset(tournament, attrs) do
     tournament
     |> cast(attrs, [:name, :game_type, :entry_fee, :max_players, :creator_id, :platform_cut_percent])
-    |> validate_required([:name, :game_type, :entry_fee, :creator_id])
+    |> validate_required([:game_type, :entry_fee, :creator_id])
     |> validate_inclusion(:game_type, @game_types)
     |> validate_number(:entry_fee, greater_than: 0)
     |> validate_number(:max_players, equal_to: 2)
@@ -70,7 +70,16 @@ defmodule Vector.Tournaments.Tournament do
   def statuses, do: @statuses
 
   defp put_invite_code(changeset) do
-    put_change(changeset, :invite_code, generate_invite_code())
+    code = generate_invite_code()
+    changeset
+    |> put_change(:invite_code, code)
+    |> then(fn cs ->
+      if get_field(cs, :name) in [nil, ""] do
+        put_change(cs, :name, code)
+      else
+        cs
+      end
+    end)
   end
 
   defp generate_invite_code do
