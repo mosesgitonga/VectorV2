@@ -9,11 +9,13 @@ config :vector, VectorWeb.Endpoint,
 
 # App-level config — only override values that are explicitly set in the environment
 # so that dev.exs defaults are preserved when env vars are absent
+app_url = System.get_env("APP_URL", "http://localhost:4000")
+
 config :vector,
-  app_url: System.get_env("APP_URL", "http://localhost:3000"),
+  app_url: System.get_env("FRONTEND_URL", "http://localhost:3000"),
   google_client_id: System.get_env("GOOGLE_CLIENT_ID", ""),
   google_client_secret: System.get_env("GOOGLE_CLIENT_SECRET", ""),
-  google_redirect_uri: System.get_env("GOOGLE_REDIRECT_URI", "http://localhost:4000/api/auth/google/callback")
+  google_redirect_uri: System.get_env("GOOGLE_REDIRECT_URI", "#{app_url}/api/auth/google/callback")
 
 if paystack_key = System.get_env("PAYSTACK_SECRET_KEY") do
   config :vector, paystack_secret_key: paystack_key
@@ -52,12 +54,18 @@ if config_env() == :prod do
 
   host = System.get_env("PHX_HOST") || "example.com"
 
+  frontend_url_for_check =
+    System.get_env("FRONTEND_URL") || raise "environment variable FRONTEND_URL is missing."
+
   config :vector, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   config :vector, VectorWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [ip: {0, 0, 0, 0, 0, 0, 0, 0}],
-    secret_key_base: secret_key_base
+    secret_key_base: secret_key_base,
+    # Allow WebSocket connections from the frontend origin.
+    # Without this Phoenix rejects connections from a different host.
+    check_origin: [frontend_url_for_check, "http://localhost:3000", "http://localhost:4000"]
 
   config :vector, Vector.Mailer,
     adapter: Swoosh.Adapters.SMTP,
