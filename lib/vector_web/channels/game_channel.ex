@@ -25,13 +25,18 @@ defmodule VectorWeb.GameChannel do
   @impl true
   def handle_info({:after_join, session_id}, socket) do
     user_id = socket.assigns.current_user.id
+
+    # Ensure the GameServer is running — it may not be if the server restarted
+    # or if the session was created and committed without starting the process.
+    Vector.Games.GameSupervisor.start_game(session_id)
+
     GameServer.player_connected(session_id, user_id)
 
     case GameServer.get_state(session_id) do
       {:ok, state} ->
         push(socket, "game_state", %{
-          state:       state.game_state,
-          timing:      state.timing,
+          state:        state.game_state,
+          timing:       state.timing,
           move_history: (state.session.move_history || []),
         })
 
