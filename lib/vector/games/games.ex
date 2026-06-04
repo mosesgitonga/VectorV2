@@ -42,12 +42,12 @@ defmodule Vector.Games do
     |> Repo.update()
   end
 
-  def finish_game(session_id, winner_id, result) do
+  def finish_game(session_id, winner_id, result, reason \\ nil) do
     session = get_session!(session_id)
 
     with {:ok, session} <-
            session
-           |> GameSession.finish_changeset(winner_id, result)
+           |> GameSession.finish_changeset(winner_id, result, reason)
            |> Repo.update() do
       Vector.Tournaments.on_game_finished(session)
       {:ok, session}

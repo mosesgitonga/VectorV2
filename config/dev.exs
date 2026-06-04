@@ -1,9 +1,13 @@
 import Config
 
+# Paystack test keys (dev only)
+config :vector,
+  paystack_secret_key: "sk_test_18de6149eadbabc1b233a3ce1cf9b42e20f916ce"
+
 # Configure your database
 config :vector, Vector.Repo,
   username: "postgres",
-  password: "moses",
+  password: System.get_env("PGPASSWORD", "moses"),
   hostname: "localhost",
   database: "vector_dev",
   stacktrace: true,

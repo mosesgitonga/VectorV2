@@ -15,6 +15,10 @@ defmodule Vector.Games.GameSession do
     field :move_history, {:array, :map}, default: []
     field :current_turn, :string
     field :result, :string
+    field :result_reason, :string
+    field :white_time_ms, :integer, default: 1_800_000
+    field :black_time_ms, :integer, default: 1_800_000
+    field :turn_started_at, :utc_datetime_usec
     field :started_at, :utc_datetime
     field :finished_at, :utc_datetime
 
@@ -46,12 +50,13 @@ defmodule Vector.Games.GameSession do
     |> change(state: new_state, move_history: history, current_turn: next_turn)
   end
 
-  def finish_changeset(session, winner_id, result) do
+  def finish_changeset(session, winner_id, result, reason \\ nil) do
     session
     |> change(
       status: "finished",
       winner_id: winner_id,
       result: result,
+      result_reason: reason,
       current_turn: nil,
       finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
     )
