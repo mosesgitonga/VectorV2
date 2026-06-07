@@ -352,8 +352,10 @@ defmodule Vector.Tournaments do
 
   defp update_prize_pool(tournament) do
     fresh = get_tournament!(tournament.id)
-    paid_count = paid_participant_count(tournament.id)
-    new_pool = Decimal.mult(fresh.entry_fee, paid_count)
+    # Show the full pool the tournament will reach once it fills up (it can
+    # only start once every slot is paid), not just what's collected so far —
+    # otherwise a "waiting for opponent" listing understates the real prize.
+    new_pool = Decimal.mult(fresh.entry_fee, fresh.max_players)
     fresh |> Ecto.Changeset.change(prize_pool: new_pool) |> Repo.update()
   end
 
