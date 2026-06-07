@@ -1,7 +1,9 @@
 defmodule Vector.Games do
   import Ecto.Query
   alias Vector.Repo
-  alias Vector.Games.{GameSession, GameSupervisor, Chess.Board, Morris.Board}
+  alias Vector.Games.{GameSession, GameSupervisor}
+  alias Vector.Games.Chess.Board, as: ChessBoard
+  alias Vector.Games.Morris.Board, as: MorrisBoard
 
   def get_session(id), do: Repo.get(GameSession, id)
 
@@ -71,6 +73,6 @@ defmodule Vector.Games do
     end
   end
 
-  defp initial_state_for("chess"), do: Board.initial_state()
-  defp initial_state_for("morris"), do: Vector.Games.Morris.Board.initial_state()
+  defp initial_state_for("chess"), do: ChessBoard.initial_state()
+  defp initial_state_for("morris"), do: MorrisBoard.initial_state()
 end
