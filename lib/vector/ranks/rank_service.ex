@@ -25,15 +25,19 @@ defmodule Vector.Ranks.RankService do
   # Ordered ascending by level. Both elo_min and games_min are inclusive minima.
 
   @ranks [
-    %{level: 1, name: "Pawn",     emoji: "♟️",  elo_min: 0,    games_min: 0,   max_pool: 500,   cut: "0.20"},
-    %{level: 2, name: "Hunter",   emoji: "🏹",  elo_min: 1000, games_min: 10,  max_pool: 1000,  cut: "0.18"},
-    %{level: 3, name: "Knight",   emoji: "♞",   elo_min: 1200, games_min: 25,  max_pool: 2500,  cut: "0.15"},
-    %{level: 4, name: "Predator", emoji: "🐺",  elo_min: 1400, games_min: 50,  max_pool: 5000,  cut: "0.13"},
-    %{level: 5, name: "Warlord",  emoji: "⚔️",  elo_min: 1600, games_min: 100, max_pool: 10000, cut: "0.11"},
-    %{level: 6, name: "Shark",    emoji: "🦈",  elo_min: 1800, games_min: 200, max_pool: 25000, cut: "0.09"},
-    %{level: 7, name: "Dragon",   emoji: "🐉",  elo_min: 2000, games_min: 350, max_pool: 50000, cut: "0.085"},
-    %{level: 8, name: "God Mode", emoji: "⚡",  elo_min: 2200, games_min: 500, max_pool: nil,   cut: "0.08"},
+    %{level: 1, name: "Pawn",     emoji: "♟️",  elo_min: 0,    games_min: 0,   max_pool: 500},
+    %{level: 2, name: "Hunter",   emoji: "🏹",  elo_min: 1000, games_min: 10,  max_pool: 1000},
+    %{level: 3, name: "Knight",   emoji: "♞",   elo_min: 1200, games_min: 25,  max_pool: 2500},
+    %{level: 4, name: "Predator", emoji: "🐺",  elo_min: 1400, games_min: 50,  max_pool: 5000},
+    %{level: 5, name: "Warlord",  emoji: "⚔️",  elo_min: 1600, games_min: 100, max_pool: 10000},
+    %{level: 6, name: "Shark",    emoji: "🦈",  elo_min: 1800, games_min: 200, max_pool: 25000},
+    %{level: 7, name: "Dragon",   emoji: "🐉",  elo_min: 2000, games_min: 350, max_pool: 50000},
+    %{level: 8, name: "God Mode", emoji: "⚡",  elo_min: 2200, games_min: 500, max_pool: nil},
   ]
+
+  # Flat platform cut applied to every tournament regardless of rank —
+  # players always keep 85% of the prize pool, no matter their tier.
+  @platform_cut Decimal.new("0.15")
 
   @unranked_games_threshold 0
   @god_mode_top_percentile  0.01  # top 1% of active players
@@ -93,29 +97,16 @@ defmodule Vector.Ranks.RankService do
 
   # ── Platform cut ───────────────────────────────────────────────────────────
 
-  @doc "Platform cut as a Decimal for a rank name. nil/unranked → Pawn cut (20%)."
-  def get_platform_cut(nil),       do: Decimal.new("0.20")
-  def get_platform_cut(rank_name) do
-    case find_rank(rank_name) do
-      nil  -> Decimal.new("0.20")
-      rank -> Decimal.new(rank.cut)
-    end
-  end
+  @doc "Platform cut as a Decimal — flat 15% for every player, regardless of rank."
+  def get_platform_cut(_rank_name), do: @platform_cut
 
   @doc """
-  Determine the platform cut for a tournament based on both players' ranks.
-  Rule: use the cut of the LOWER-ranked player (higher cut = more protection).
+  Platform cut for a tournament between two players. Currently a flat rate
+  for everyone (see `get_platform_cut/1`) — kept as a 2-player+game_type
+  function so tournament join/create call sites don't change if the cut
+  ever becomes rank-sensitive again.
   """
-  def tournament_platform_cut(player_one, player_two, game_type) do
-    {elo1, g1} = player_stats(player_one, game_type)
-    {elo2, g2} = player_stats(player_two, game_type)
-    rank1 = calculate_rank(elo1, g1, game_type)
-    rank2 = calculate_rank(elo2, g2, game_type)
-    level1 = rank_level(rank1)
-    level2 = rank_level(rank2)
-    lower_rank = if level1 <= level2, do: rank1, else: rank2
-    get_platform_cut(lower_rank)
-  end
+  def tournament_platform_cut(_player_one, _player_two, _game_type), do: get_platform_cut(nil)
 
   # ── Stake limits ───────────────────────────────────────────────────────────
 
