@@ -12,6 +12,7 @@ defmodule Vector.Application do
       Vector.Repo,
       {DNSCluster, query: Application.get_env(:vector, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Vector.PubSub},
+      VectorWeb.Presence,
       {Finch, name: Vector.Finch},
       {Registry, keys: :unique, name: Vector.GameRegistry},
       Vector.Games.GameSupervisor,

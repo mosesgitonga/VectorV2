@@ -2,6 +2,7 @@ defmodule VectorWeb.UserSocket do
   use Phoenix.Socket
 
   channel "game:*", VectorWeb.GameChannel
+  channel "lobby:*", VectorWeb.LobbyChannel
 
   @impl true
   def connect(%{"token" => token}, socket, _connect_info) do
