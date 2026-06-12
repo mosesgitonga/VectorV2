@@ -10,6 +10,12 @@ defmodule Vector.Tournaments do
 
   @max_created_tournaments 2
 
+  # Current tournament terms version recorded against each participant on
+  # create/join. Bump when the /terms/tournament content materially changes.
+  @current_terms_version "1.0"
+
+  def current_terms_version, do: @current_terms_version
+
   # ── Queries ────────────────────────────────────────────────────────────────
 
   def get_tournament(id) do
@@ -291,7 +297,9 @@ defmodule Vector.Tournaments do
           err
       end
     else
-      # Draw — mark finished then refund; separate transactions for same reason.
+      # Draw (stalemate or mutual-AFK) — mark finished then refund 90% to each
+      # player; the platform keeps 20% of the pot. Separate transactions so a
+      # refund failure can't leave the tournament stuck.
       case Repo.transaction(fn ->
         with {:ok, updated} <- tournament |> Tournament.finish_changeset(nil) |> Repo.update() do
           updated
@@ -300,7 +308,7 @@ defmodule Vector.Tournaments do
         end
       end) do
         {:ok, finished} ->
-          case Payments.refund_tournament_participants(finished) do
+          case Payments.refund_tournament_participants(finished, Decimal.new("0.90")) do
             {:ok, _} -> :ok
             {:error, reason} ->
               Logger.error("Refund failed after draw",
@@ -339,13 +347,19 @@ defmodule Vector.Tournaments do
 
   defp add_participant(tournament, user) do
     seat = participant_count(tournament.id) + 1
+    now  = DateTime.utc_now() |> DateTime.truncate(:second)
 
     %TournamentParticipant{}
     |> TournamentParticipant.changeset(%{
       tournament_id: tournament.id,
       user_id: user.id,
       seat: seat,
-      paid_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      paid_at: now,
+      # Terms acceptance is gated at the controller; we record it authoritatively
+      # here with the server's current version + a server-side timestamp.
+      terms_accepted: true,
+      terms_accepted_at: now,
+      terms_version: @current_terms_version
     })
     |> Repo.insert()
   end

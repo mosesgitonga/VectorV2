@@ -3,11 +3,17 @@ defmodule Vector.Games.GameServer do
   GenServer managing in-memory state for one active game session.
 
   Time control rules (enforced server-side, not trusting client):
-    - Each player has 30 minutes total across the whole game
-    - No single move may take more than 10 minutes
-    - Whichever limit is hit first causes an immediate forfeit
+    - Each move has a per-game time limit (Chess 8 min, Morris 3 min).
+      The clock resets to the full limit at the start of every turn.
+    - A move-timeout does NOT lose the game: the turn is skipped (passed to
+      the opponent) and the timed-out player accrues a "missed turn".
+    - If a player misses 2 of their own consecutive turns while the opponent
+      is still moving (opponent has 0 misses), the opponent wins (reason "afk").
+    - If BOTH players reach 2 missed turns, the game ends as a mutual-AFK
+      draw (reason "mutual_afk").
+    - A real move resets only the mover's own missed-turn counter to 0.
     - If a player disconnects and does not reconnect within 3 minutes,
-      they forfeit (unless the game is already over)
+      they forfeit (unless the game is already over).
 
   Edge cases handled:
     - Wrong-turn submissions → rejected
@@ -15,7 +21,6 @@ defmodule Vector.Games.GameServer do
     - Double-move race: GenServer serialises all calls, so only one
       `make_move` runs at a time
     - Self-play manipulation: colour assigned at session creation, not client
-    - Replay attacks: each move deducts real elapsed wall-clock time
     - Game-over submissions: rejected once `finished` flag is set
     - GenServer idle fallback: if nothing happens for 15 min the process
       stops and the session is marked abandoned
@@ -29,10 +34,13 @@ defmodule Vector.Games.GameServer do
 
   # ── Constants ──────────────────────────────────────────────────────────────
 
-  @move_limit_ms       10 * 60 * 1_000   # 10-min cap per move
-  @total_time_ms       30 * 60 * 1_000   # 30-min total per player
   @disconnect_grace_ms  3 * 60 * 1_000   # 3-min reconnect window
   @idle_stop_ms        15 * 60 * 1_000   # kill idle GenServer after 15 min
+  @afk_forfeit_misses  2                 # missed own turns before AFK forfeit/draw
+
+  # Per-move time limit by game type. The clock resets at the start of each turn.
+  defp move_limit_ms("chess"),  do: 8 * 60 * 1_000
+  defp move_limit_ms("morris"), do: 3 * 60 * 1_000
 
   # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -69,11 +77,11 @@ defmodule Vector.Games.GameServer do
       player_one_id: session.player_one_id,   # always white
       player_two_id: session.player_two_id,   # always black
       game_state: session.state,
-      # Time tracking
-      white_time_ms: @total_time_ms,
-      black_time_ms: @total_time_ms,
+      # Per-move time tracking (clock resets to the limit each turn)
       turn_started_at: DateTime.utc_now(),
       move_timer_ref: nil,
+      # Consecutive missed turns per colour (reset by that colour's real move)
+      missed_turns: %{"white" => 0, "black" => 0},
       # Connection
       connected_players: MapSet.new(),
       disconnect_timers: %{},
@@ -81,7 +89,7 @@ defmodule Vector.Games.GameServer do
       finished: false,
     }
 
-    # White moves first — start the 10-min move clock now
+    # White moves first — start the per-move clock now
     state = schedule_move_timer(state, "white")
     {:ok, state, @idle_stop_ms}
   end
@@ -100,7 +108,6 @@ defmodule Vector.Games.GameServer do
     else
       with {:ok, color}          <- get_player_color(state, player_id),
            :ok                   <- assert_correct_turn(state, color),
-           {:ok, timed_state}    <- deduct_elapsed_time(state, color),
            :ok                   <- assert_valid_move(state, move, color),
            {:ok, new_game_state} <- do_apply_move(state, move, color) do
 
@@ -110,11 +117,13 @@ defmodule Vector.Games.GameServer do
         {:ok, updated_session} =
           Games.record_move(state.session_id, new_game_state, move, next_color)
 
-        new_state = %{timed_state |
+        new_state = %{state |
           game_state: new_game_state,
           session: updated_session,
           turn_started_at: DateTime.utc_now(),
           move_timer_ref: nil,
+          # A real move clears only this player's missed-turn streak.
+          missed_turns: Map.put(state.missed_turns, color, 0),
         }
 
         case check_game_over(state.game_type, new_game_state) do
@@ -132,11 +141,6 @@ defmodule Vector.Games.GameServer do
             {:reply, {:ok, %{state: new_game_state, game_over: false, timing: timing}}, new_state, @idle_stop_ms}
         end
       else
-        {:error, :time_exceeded} ->
-          # Player exhausted their time allowance mid-move
-          new_state = do_finish_timeout(state, get_color!(state, player_id))
-          {:reply, {:error, :time_exceeded}, new_state}
-
         {:error, reason} ->
           {:reply, {:error, reason}, state}
       end
@@ -183,8 +187,7 @@ defmodule Vector.Games.GameServer do
     if state.finished do
       {:noreply, state}
     else
-      new_state = do_finish_timeout(state, color)
-      {:noreply, new_state}
+      {:noreply, handle_afk_timeout(state, color)}
     end
   end
 
@@ -224,30 +227,91 @@ defmodule Vector.Games.GameServer do
 
   # ── Private ────────────────────────────────────────────────────────────────
 
-  # Finish a game due to a player running out of time.
-  # Broadcasts game_over via PubSub so the GameChannel can push it to clients.
-  defp do_finish_timeout(state, loser_color) do
-    Logger.info("Game timeout", session_id: state.session_id, loser: loser_color)
+  # A player let their move clock expire. The turn is skipped (passed to the
+  # opponent) and their missed-turn streak grows. Two missed own turns forfeit
+  # the game to an active opponent, or end it as a mutual-AFK draw if both have
+  # gone idle. Broadcasts via PubSub so the GameChannel can push to clients.
+  defp handle_afk_timeout(state, color) do
     cancel_timer(state.move_timer_ref)
-    winner_color = next_turn(loser_color)
-    winner_id    = color_to_player_id(winner_color, state)
-    result       = "#{winner_color}_wins"
-    Games.finish_game(state.session_id, winner_id, result, "timeout")
-    pub_broadcast(state.session_id, "game_over", %{
-      result: result,
-      reason: "timeout",
-      loser: loser_color,
-      winner_id: winner_id,
-    })
-    %{state | finished: true, move_timer_ref: nil}
+    opp        = next_turn(color)
+    missed     = Map.get(state.missed_turns, color, 0) + 1
+    opp_missed = Map.get(state.missed_turns, opp, 0)
+    state      = %{state | missed_turns: Map.put(state.missed_turns, color, missed)}
+
+    cond do
+      missed >= @afk_forfeit_misses and opp_missed >= @afk_forfeit_misses ->
+        # Both players idle → mutual-AFK draw.
+        Logger.info("Mutual AFK draw", session_id: state.session_id)
+        Games.finish_game(state.session_id, nil, "draw", "mutual_afk")
+        pub_broadcast(state.session_id, "game_over", %{
+          result: "draw", reason: "mutual_afk", winner_id: nil,
+        })
+        %{state | finished: true, move_timer_ref: nil}
+
+      missed >= @afk_forfeit_misses and opp_missed == 0 ->
+        # Opponent is still actively playing → they win by forfeit.
+        Logger.info("AFK forfeit", session_id: state.session_id, loser: color)
+        winner_id = color_to_player_id(opp, state)
+        result    = "#{opp}_wins"
+        Games.finish_game(state.session_id, winner_id, result, "afk")
+        pub_broadcast(state.session_id, "game_over", %{
+          result: result, reason: "afk", loser: color, winner_id: winner_id,
+        })
+        %{state | finished: true, move_timer_ref: nil}
+
+      true ->
+        # No terminal outcome yet — pass the turn to the opponent.
+        pass_turn(state, color, opp)
+    end
   end
 
-  # Schedule a move-timeout message for `color`.
-  # Fires after min(player's remaining total time, @move_limit_ms).
+  # Skip the timed-out player's turn: flip the active colour without a real
+  # move, persist it, and hand the clock to the opponent. A null move can leave
+  # the opponent with no legal reply (rare stalemate/checkmate-on-pass), so we
+  # re-check game-over before continuing.
+  defp pass_turn(state, from_color, to_color) do
+    new_game_state =
+      state.game_state
+      |> Map.put("current_turn", to_color)
+      |> Map.put("en_passant_target", nil)   # passed turn expires en passant (chess); no-op for morris
+
+    pass_record = %{"type" => "timeout_pass", "color" => from_color}
+
+    {:ok, updated_session} =
+      Games.record_move(state.session_id, new_game_state, pass_record, to_color)
+
+    state = %{state |
+      game_state: new_game_state,
+      session: updated_session,
+      turn_started_at: DateTime.utc_now(),
+      move_timer_ref: nil,
+    }
+
+    case check_game_over(state.game_type, new_game_state) do
+      {:finished, result} ->
+        winner_id = result_to_winner_id(result, state)
+        reason    = game_over_reason(result)
+        Games.finish_game(state.session_id, winner_id, result, reason)
+        pub_broadcast(state.session_id, "game_over", %{
+          result: result, reason: reason, winner_id: winner_id,
+        })
+        %{state | finished: true}
+
+      :ongoing ->
+        new_state = schedule_move_timer(state, to_color)
+        pub_broadcast(state.session_id, "turn_passed", %{
+          state: new_game_state,
+          skipped: from_color,
+          timing: timing_snapshot(new_state),
+        })
+        new_state
+    end
+  end
+
+  # Schedule a move-timeout message for `color`, firing after this game's
+  # per-move limit (the clock resets to the full limit every turn).
   defp schedule_move_timer(state, color) do
-    time_left = Map.get(state, :"#{color}_time_ms")
-    timeout   = min(time_left, @move_limit_ms)
-    ref       = Process.send_after(self(), {:move_timeout, color}, timeout)
+    ref = Process.send_after(self(), {:move_timeout, color}, move_limit_ms(state.game_type))
     %{state | move_timer_ref: ref}
   end
 
@@ -263,53 +327,36 @@ defmodule Vector.Games.GameServer do
     end
   end
 
-  # Deduct wall-clock elapsed time from the current player's total.
-  # Caps the deduction at @move_limit_ms (10 min) — you can't lose more
-  # than one move's worth of time even if you stall longer.
-  defp deduct_elapsed_time(state, color) do
-    elapsed  = DateTime.diff(DateTime.utc_now(), state.turn_started_at, :millisecond)
-    deducted = min(elapsed, @move_limit_ms)
-    key      = :"#{color}_time_ms"
-    remaining = Map.get(state, key) - deducted
-
-    if remaining <= 0 do
-      {:error, :time_exceeded}
-    else
-      {:ok, Map.put(state, key, remaining)}
-    end
-  end
-
-  # Build timing for a get_state call — adjusts the active player's display
-  # time by subtracting the elapsed time of the current move.
+  # Per-move clock for a live get_state call: the active player's clock counts
+  # down from this game's move limit by the elapsed time of the current move;
+  # the idle player shows a full fresh limit (their next turn's budget).
   defp compute_live_timing(state) do
+    limit        = move_limit_ms(state.game_type)
     elapsed      = DateTime.diff(DateTime.utc_now(), state.turn_started_at, :millisecond)
     current_turn = state.game_state["current_turn"] || "white"
+    active_ms    = max(0, limit - elapsed)
 
     {white_ms, black_ms} =
-      if current_turn == "white" do
-        {max(0, state.white_time_ms - elapsed), state.black_time_ms}
-      else
-        {state.white_time_ms, max(0, state.black_time_ms - elapsed)}
-      end
+      if current_turn == "white", do: {active_ms, limit}, else: {limit, active_ms}
 
     %{
       white_time_ms:    white_ms,
       black_time_ms:    black_ms,
       current_turn:     current_turn,
-      move_elapsed_ms:  min(elapsed, @move_limit_ms),
-      move_limit_ms:    @move_limit_ms,
-      total_limit_ms:   @total_time_ms,
+      move_elapsed_ms:  min(elapsed, limit),
+      move_limit_ms:    limit,
     }
   end
 
-  # Build timing snapshot after a move (times already updated in state).
+  # Timing snapshot at the start of a fresh turn — both clocks at the full limit.
   defp timing_snapshot(state) do
+    limit = move_limit_ms(state.game_type)
+
     %{
-      white_time_ms:  state.white_time_ms,
-      black_time_ms:  state.black_time_ms,
+      white_time_ms:  limit,
+      black_time_ms:  limit,
       current_turn:   state.game_state["current_turn"] || "white",
-      move_limit_ms:  @move_limit_ms,
-      total_limit_ms: @total_time_ms,
+      move_limit_ms:  limit,
     }
   end
 
@@ -325,11 +372,6 @@ defmodule Vector.Games.GameServer do
       player_id == p2 -> {:ok, "black"}
       true            -> {:error, :not_a_player}
     end
-  end
-
-  defp get_color!(state, player_id) do
-    {:ok, color} = get_player_color(state, player_id)
-    color
   end
 
   defp assert_correct_turn(%{game_state: gs}, color) do

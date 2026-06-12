@@ -26,6 +26,11 @@ defmodule VectorWeb.GameChannel do
   def handle_info({:after_join, session_id}, socket) do
     user_id = socket.assigns.current_user.id
 
+    # Receive timer-driven events (timeout/disconnect/abandon/afk/turn-pass)
+    # the GameServer publishes — they arrive on this topic via PubSub and are
+    # relayed to the client by the {event, payload} handle_info clauses below.
+    Phoenix.PubSub.subscribe(Vector.PubSub, "game_events:#{session_id}")
+
     # Ensure the GameServer is running — it may not be if the server restarted
     # or if the session was created and committed without starting the process.
     Vector.Games.GameSupervisor.start_game(session_id)
@@ -44,6 +49,19 @@ defmodule VectorWeb.GameChannel do
         :ok
     end
 
+    {:noreply, socket}
+  end
+
+  # Relay GameServer PubSub events (broadcast to "game_events:<id>") to the client.
+  @impl true
+  def handle_info({"game_over", payload}, socket) do
+    push(socket, "game_over", payload)
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({"turn_passed", payload}, socket) do
+    push(socket, "turn_passed", payload)
     {:noreply, socket}
   end
 

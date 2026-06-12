@@ -40,11 +40,16 @@ defmodule VectorWeb.TournamentController do
       entry_fee: parse_decimal(params["entry_fee"])
     }
 
-    case Tournaments.create_tournament(user, attrs) do
-      {:ok, {tournament, updated_user}} ->
+    with :ok <- require_terms(params),
+         {:ok, {tournament, updated_user}} <- Tournaments.create_tournament(user, attrs) do
+      conn
+      |> put_status(:created)
+      |> json(%{tournament: tournament_json(tournament), balance: updated_user.balance})
+    else
+      {:error, :terms_not_accepted} ->
         conn
-        |> put_status(:created)
-        |> json(%{tournament: tournament_json(tournament), balance: updated_user.balance})
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: "You must accept the terms and conditions."})
 
       {:error, %Ecto.Changeset{} = changeset} ->
         conn
@@ -58,25 +63,34 @@ defmodule VectorWeb.TournamentController do
     end
   end
 
-  def join(conn, %{"invite_code" => code}) do
+  def join(conn, %{"invite_code" => code} = params) do
     user = conn.assigns.current_user
 
-    case Tournaments.get_tournament_by_invite(code) do
+    with :ok <- require_terms(params),
+         tournament when not is_nil(tournament) <- Tournaments.get_tournament_by_invite(code),
+         {:ok, {refreshed_tournament, updated_user}} <- Tournaments.join_tournament(tournament, user) do
+      json(conn, %{tournament: tournament_json(refreshed_tournament), balance: updated_user.balance})
+    else
+      {:error, :terms_not_accepted} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: "You must accept the terms and conditions."})
+
       nil ->
         conn |> put_status(:not_found) |> json(%{error: "Invalid invite code"})
 
-      tournament ->
-        case Tournaments.join_tournament(tournament, user) do
-          {:ok, {refreshed_tournament, updated_user}} ->
-            json(conn, %{tournament: tournament_json(refreshed_tournament), balance: updated_user.balance})
-
-          {:error, reason} ->
-            conn
-            |> put_status(:unprocessable_entity)
-            |> json(%{error: format_error(reason)})
-        end
+      {:error, reason} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: format_error(reason)})
     end
   end
+
+  # Reject create/join unless the client explicitly accepted the terms. The
+  # accepted version + timestamp are recorded server-side in add_participant/3.
+  defp require_terms(%{"terms_accepted" => true}), do: :ok
+  defp require_terms(%{"terms_accepted" => "true"}), do: :ok
+  defp require_terms(_), do: {:error, :terms_not_accepted}
 
   def cancel(conn, %{"id" => id}) do
     user = conn.assigns.current_user
@@ -150,7 +164,7 @@ defmodule VectorWeb.TournamentController do
     }
   end
 
-  defp participant_json(p, game_type \\ "chess") do
+  defp participant_json(p, game_type) do
     alias Vector.Ranks.RankService
     rank_data = if p.user && p.user.__struct__ != Ecto.Association.NotLoaded do
       {elo, games} = RankService.player_stats(p.user, game_type)
@@ -174,6 +188,9 @@ defmodule VectorWeb.TournamentController do
       rank: rank_data.rank,
       elo: rank_data.elo,
       rank_emoji: rank_data.emoji,
+      terms_accepted: p.terms_accepted,
+      terms_accepted_at: p.terms_accepted_at,
+      terms_version: p.terms_version,
     }
   end
 

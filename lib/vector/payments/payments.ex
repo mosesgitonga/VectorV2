@@ -282,18 +282,26 @@ defmodule Vector.Payments do
     end)
   end
 
-  def refund_tournament_participants(tournament) do
+  # Full (100%) refund — used for pre-fill cancellation, where the game never
+  # started and the platform takes nothing.
+  def refund_tournament_participants(tournament),
+    do: refund_tournament_participants(tournament, Decimal.new("1"))
+
+  # Partial refund: credits `percent` of each player's entry fee (e.g. 0.90 on a
+  # draw, where the platform retains the rest of the pot). `percent` is a Decimal
+  # in [0, 1]. All-or-nothing: any failed step rolls back the whole batch.
+  def refund_tournament_participants(tournament, percent) do
     transactions =
       Transaction
       |> where(tournament_id: ^tournament.id, type: "entry_fee", status: "success")
       |> Repo.all()
 
-    # All-or-nothing: if any refund step fails the whole batch rolls back.
     Repo.transaction(fn ->
       Enum.each(transactions, fn tx ->
         user = from(u in User, where: u.id == ^tx.user_id, lock: "FOR UPDATE") |> Repo.one!()
+        refund_amount = tx.amount |> Decimal.mult(percent) |> Decimal.round(2)
 
-        with {:ok, _} <- user |> User.credit_balance_changeset(tx.amount) |> Repo.update(),
+        with {:ok, _} <- user |> User.credit_balance_changeset(refund_amount) |> Repo.update(),
              {:ok, _} <- tx |> Transaction.refund_changeset() |> Repo.update() do
           :ok
         else
