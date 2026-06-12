@@ -124,7 +124,7 @@ defmodule Vector.Games.GameServer do
             Games.finish_game(state.session_id, winner_id, result, reason)
             timing = timing_snapshot(new_state)
             final = %{new_state | finished: true}
-            {:reply, {:ok, %{state: new_game_state, game_over: true, result: result, reason: reason, timing: timing}}, final}
+            {:reply, {:ok, %{state: new_game_state, game_over: true, result: result, reason: reason, winner_id: winner_id, timing: timing}}, final}
 
           :ongoing ->
             new_state = schedule_move_timer(new_state, next_color)

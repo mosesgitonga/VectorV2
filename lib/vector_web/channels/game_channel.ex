@@ -59,6 +59,8 @@ defmodule VectorWeb.GameChannel do
           state:    result.state,
           game_over: result.game_over,
           result:   Map.get(result, :result),
+          reason:   Map.get(result, :reason),
+          winner_id: Map.get(result, :winner_id),
           timing:   Map.get(result, :timing),
         })
 
